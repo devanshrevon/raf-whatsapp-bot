@@ -1,6 +1,7 @@
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 
-async function logEvent(leadId: string, eventType: string, detail?: Record<string, unknown>) {
+async function logEvent(leadId: string, eventType: string, detail?: Prisma.InputJsonValue) {
   await db.systemEvent.create({ data: { leadId, eventType, detail: detail ?? {} } });
 }
 
