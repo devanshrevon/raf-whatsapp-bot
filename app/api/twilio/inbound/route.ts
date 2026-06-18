@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
   buildWebhookUrl,
@@ -6,8 +7,13 @@ import {
 } from "@/lib/twilio/verify-signature";
 import { sendWhatsAppMessage } from "@/lib/twilio/send-message";
 import { toE164 } from "@/lib/twilio/phone";
+import { processInboundMessage } from "@/lib/ai/process-message";
+import type { ChatMessage } from "@/lib/ai/client";
 
 export const dynamic = "force-dynamic";
+
+// How many past turns to give the model for context.
+const HISTORY_LIMIT = 20;
 
 // Empty TwiML — we reply via the REST API (lib/twilio/send-message), so the
 // webhook response itself carries no message.
@@ -21,19 +27,18 @@ function twiml(status = 200): NextResponse {
   });
 }
 
-// Phase 2 placeholder replies. Phase 3 replaces this with the OpenAI
-// conversation engine (lib/ai/process-message.ts). The first line is the
-// approved intro from spec §13.1; later turns get a neutral holding line until
-// the engine is wired up.
-const INTRO_REPLY =
-  "Hi, I'm the virtual assistant supporting Raf's team. What name would you like me to use?";
-const HOLDING_REPLY =
-  "Thanks, I've got your message. Someone from Raf's team will be in touch shortly.";
+async function logEvent(
+  leadId: string,
+  eventType: string,
+  detail: Prisma.InputJsonValue
+) {
+  await db.systemEvent.create({ data: { leadId, eventType, detail } });
+}
 
 /**
- * Inbound WhatsApp webhook (spec §10). Phase 2 wires the pipeline up to
- * storing the message and sending a reply; the OpenAI fact-extraction and
- * next-action logic arrive in Phase 3.
+ * Inbound WhatsApp webhook (spec §10):
+ * verify → dedup → load/create lead → store inbound → opt-out/pause gate →
+ * OpenAI conversation engine → persist facts → reply → (Phase 5: schedule).
  */
 export async function POST(request: NextRequest) {
   // 1. Verify the Twilio signature.
@@ -80,7 +85,7 @@ export async function POST(request: NextRequest) {
   });
 
   // 4. Store the inbound message.
-  await db.message.create({
+  const inbound = await db.message.create({
     data: {
       leadId: lead.id,
       twilioMessageSid: messageSid,
@@ -90,40 +95,68 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  // 5. Do not auto-reply if the customer opted out or the bot is paused
-  //    (full opt-out detection of free-text "stop" arrives in Phase 6).
+  // 5. Don't auto-reply if the customer opted out or the bot is paused
+  //    (free-text "stop" detection arrives in Phase 6).
   if (lead.optedOut || lead.botPaused) {
     return twiml();
   }
 
-  // 6. Send the Phase 2 placeholder reply.
-  const outboundCount = await db.message.count({
-    where: { leadId: lead.id, direction: "OUTBOUND" },
+  // 6. Run the conversation engine over the recent history.
+  const recent = await db.message.findMany({
+    where: { leadId: lead.id },
+    orderBy: { createdAt: "asc" },
+    take: HISTORY_LIMIT,
   });
-  const reply = outboundCount === 0 ? INTRO_REPLY : HOLDING_REPLY;
+  const history: ChatMessage[] = recent.map((m) => ({
+    role: m.direction === "INBOUND" ? "user" : "assistant",
+    content: m.body,
+  }));
 
-  try {
-    await sendWhatsAppMessage({
-      leadId: lead.id,
-      to: phone,
-      body: reply,
-      senderType: "BOT",
-      promptVersion: "phase2-placeholder",
-    });
-  } catch (error) {
-    // Log the failure but still 200 so Twilio doesn't hammer retries; the
-    // inbound message is already stored for the team to see.
-    await db.systemEvent.create({
-      data: {
-        leadId: lead.id,
-        eventType: "external_api_failure",
-        detail: {
-          where: "twilio_send",
-          message: error instanceof Error ? error.message : String(error),
-        },
-      },
+  const result = await processInboundMessage(lead, history);
+
+  // 7. Persist extracted facts + new stage, and annotate the inbound message.
+  await db.lead.update({ where: { id: lead.id }, data: result.leadUpdates });
+  await db.message.update({
+    where: { id: inbound.id },
+    data: {
+      detectedIntent: result.intent ?? undefined,
+      extractedData: result.leadUpdates as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  if (result.needsHumanReview) {
+    await logEvent(lead.id, "safeguarding_flag", {
+      riskLevel: result.riskLevel,
+      flags: result.riskFlags,
     });
   }
+  if (result.aiError) {
+    await logEvent(lead.id, "external_api_failure", { where: "openai" });
+  }
+
+  // 8. Send the validated reply.
+  if (result.reply) {
+    try {
+      await sendWhatsAppMessage({
+        leadId: lead.id,
+        to: phone,
+        body: result.reply,
+        senderType: "BOT",
+        promptVersion: result.promptVersion,
+        model: result.model,
+      });
+    } catch (error) {
+      await logEvent(lead.id, "external_api_failure", {
+        where: "twilio_send",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // 9. TODO (Phase 5 — intern): based on result.nextStage / needsHumanReview,
+  //    schedule or cancel ScheduledActions (INCOMPLETE_CONVERSATION reminder,
+  //    etc.). Automated follow-ups must stay paused when needsHumanReview is
+  //    true (spec §20) and be cancelled on opt-out/booking.
 
   return twiml();
 }
