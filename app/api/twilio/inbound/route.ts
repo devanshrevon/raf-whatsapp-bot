@@ -9,6 +9,7 @@ import { sendWhatsAppMessage } from "@/lib/twilio/send-message";
 import { toE164 } from "@/lib/twilio/phone";
 import { processInboundMessage } from "@/lib/ai/process-message";
 import type { ChatMessage } from "@/lib/ai/client";
+import { handleBookingTurn } from "@/lib/calendar/conversation-booking";
 
 export const dynamic = "force-dynamic";
 
@@ -115,7 +116,10 @@ export async function POST(request: NextRequest) {
   const result = await processInboundMessage(lead, history);
 
   // 7. Persist extracted facts + new stage, and annotate the inbound message.
-  await db.lead.update({ where: { id: lead.id }, data: result.leadUpdates });
+  const updatedLead = await db.lead.update({
+    where: { id: lead.id },
+    data: result.leadUpdates,
+  });
   await db.message.update({
     where: { id: inbound.id },
     data: {
@@ -134,13 +138,35 @@ export async function POST(request: NextRequest) {
     await logEvent(lead.id, "external_api_failure", { where: "openai" });
   }
 
-  // 8. Send the validated reply.
-  if (result.reply) {
+  // 8. Calendar booking turn (Phase 4). The route owns the calendar I/O; the
+  //    handler generates any slot offer / confirmation from real availability.
+  let replyText = result.reply;
+  if (result.readyForBooking && !result.needsHumanReview) {
+    const activeAppointment = await db.appointment.findFirst({
+      where: { leadId: lead.id, status: "BOOKED" },
+    });
+    if (!activeAppointment) {
+      const booking = await handleBookingTurn({
+        lead: updatedLead,
+        availability: result.availability,
+        selectedSlotStart: result.selectedSlotStart,
+      });
+      if (booking.reply) replyText = booking.reply;
+      if (booking.error) {
+        await logEvent(lead.id, "external_api_failure", { where: "google_calendar" });
+      }
+      // (Phase 5 — intern) On booking.booked, schedule an APPOINTMENT_REMINDER
+      // and cancel any INCOMPLETE_CONVERSATION follow-ups.
+    }
+  }
+
+  // 9. Send the validated reply.
+  if (replyText) {
     try {
       await sendWhatsAppMessage({
         leadId: lead.id,
         to: phone,
-        body: result.reply,
+        body: replyText,
         senderType: "BOT",
         promptVersion: result.promptVersion,
         model: result.model,
@@ -153,10 +179,10 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 9. TODO (Phase 5 — intern): based on result.nextStage / needsHumanReview,
-  //    schedule or cancel ScheduledActions (INCOMPLETE_CONVERSATION reminder,
-  //    etc.). Automated follow-ups must stay paused when needsHumanReview is
-  //    true (spec §20) and be cancelled on opt-out/booking.
+  // 10. TODO (Phase 5 — intern): based on result.nextStage / needsHumanReview,
+  //     schedule or cancel ScheduledActions (INCOMPLETE_CONVERSATION reminder,
+  //     APPOINTMENT_REMINDER on booking). Automated follow-ups must stay paused
+  //     when needsHumanReview is true (spec §20) and be cancelled on opt-out.
 
   return twiml();
 }

@@ -61,6 +61,16 @@ export const aiResponseSchema = z.object({
     )
     .default([]),
   customerQuestion: nullableString.default(null),
+  // Booking availability the customer expressed (spec §14). The app — not the
+  // model — turns these into real slots and confirms anything.
+  availability: z
+    .object({
+      date: nullableString.default(null), // YYYY-MM-DD (London)
+      earliestTime: nullableString.default(null), // HH:MM (London)
+    })
+    .default({ date: null, earliestTime: null }),
+  // When the customer picks a slot we offered, the ISO instant of that slot.
+  selectedSlotStart: nullableString.default(null),
   // Clamp anything the model returns into the valid 0–3 band (never reset a
   // high risk to 0 by accident).
   riskLevel: z

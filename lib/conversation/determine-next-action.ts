@@ -12,7 +12,8 @@ export type NextAction =
   | "ESCALATE_HUMAN"
   | "ASK_FIELD"
   | "PROPOSE_CALLBACK"
-  | "COLLECT_AVAILABILITY";
+  | "COLLECT_AVAILABILITY"
+  | "CONTINUE";
 
 export type ConversationStage =
   | "NEW"
@@ -20,7 +21,19 @@ export type ConversationStage =
   | "COLLECTING_DETAILS"
   | "READY_FOR_CALLBACK"
   | "COLLECTING_AVAILABILITY"
-  | "NEEDS_HUMAN_REVIEW";
+  | "APPOINTMENT_BOOKED"
+  | "MISSED_CALLBACK"
+  | "NEEDS_HUMAN_REVIEW"
+  | "COMPLETED"
+  | "STOPPED";
+
+// Terminal-ish stages we don't roll back to ordinary collection from.
+const PASSTHROUGH_STAGES = [
+  "APPOINTMENT_BOOKED",
+  "MISSED_CALLBACK",
+  "COMPLETED",
+  "STOPPED",
+];
 
 export type NextStep = {
   stage: ConversationStage;
@@ -33,6 +46,15 @@ export function determineNextStep(lead: Lead, riskLevel: number): NextStep {
   // Serious / vulnerable situations stop ordinary progression (spec §20).
   if (riskLevel >= 2) {
     return { stage: "NEEDS_HUMAN_REVIEW", action: "ESCALATE_HUMAN", askField: null };
+  }
+
+  // Don't downgrade a lead that's already booked / closed back into collection.
+  if (PASSTHROUGH_STAGES.includes(lead.conversationStage)) {
+    return {
+      stage: lead.conversationStage as ConversationStage,
+      action: "CONTINUE",
+      askField: null,
+    };
   }
 
   const missing = missingDataFields(lead);

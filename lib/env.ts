@@ -31,6 +31,9 @@ export const env = {
   get appVersion() {
     return optional("APP_VERSION") ?? "dev";
   },
+  get appBaseUrl() {
+    return optional("APP_BASE_URL") ?? "http://localhost:3000";
+  },
   twilio: {
     get accountSid() {
       return required("TWILIO_ACCOUNT_SID");

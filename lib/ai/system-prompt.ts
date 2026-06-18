@@ -2,6 +2,7 @@ import type { Lead } from "@prisma/client";
 import { knownFactsSummary, missingDataFields } from "@/lib/conversation/known-fields";
 import { faqForPrompt } from "@/lib/conversation/faq";
 import type { NextStep } from "@/lib/conversation/determine-next-action";
+import { londonParts } from "@/lib/calendar/timezone";
 
 // Authoritative system prompt (spec §12, §19). Versioned via PROMPT_VERSION and
 // stored on every outbound message (spec §23). Bump the version when the wording
@@ -76,14 +77,21 @@ export function buildSystemPrompt(lead: Lead, next: NextStep): string {
       break;
     case "COLLECT_AVAILABILITY":
       goal =
-        "They've agreed to a callback. Ask when would generally suit them (e.g. a day and rough time). Do NOT offer or confirm specific slots yet.";
+        "They've agreed to a callback. Ask when would generally suit them (a day and rough time). Do NOT invent or confirm specific slots — the system offers real available times.";
+      break;
+    case "CONTINUE":
+      goal =
+        "A callback is already arranged. Answer anything they ask and reassure them; don't restart the questions or re-book.";
       break;
     default:
       goal = "Continue the conversation naturally.";
   }
 
+  const today = londonParts(new Date());
+
   return [
     BASE_PROMPT,
+    `\n## Today\nToday is ${today.weekday} ${today.dateStr} (Europe/London). When the customer suggests a day/time, resolve it to an absolute date "availability.date" (YYYY-MM-DD) and "availability.earliestTime" (HH:MM). When they pick a time you previously offered, set "selectedSlotStart" to that slot's exact ISO instant. Never claim a booking is confirmed — the system confirms after the calendar accepts it.`,
     `\n## What you already know\n${knownFactsSummary(lead)}`,
     `\n## Still missing\n${missing.length ? missing.join(", ") : "Nothing — all key details collected."}`,
     `\n## Your next goal\n${goal}`,
