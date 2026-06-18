@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeLead } from "../helpers/lead";
 
-// ── mocks ─────────────────────────────────────────────────────────────────
+// ── mocks (hoisted before imports) ───────────────────────────────────────────
 vi.mock("@/lib/db", () => ({
   db: {
     lead: { findUnique: vi.fn(), update: vi.fn() },
@@ -21,29 +21,35 @@ vi.mock("@/lib/twilio/send-message", () => ({
   sendWhatsAppMessage: vi.fn().mockResolvedValue({ id: "msg_ok" }),
 }));
 
+// Static imports — mocks are already in place due to hoisting above
+import {
+  processDueScheduledActions,
+  scheduleIncompleteConversationFollowUp,
+  scheduleAppointmentReminder,
+  cancelPendingFollowUps,
+} from "@/lib/scheduled-actions/process";
 import { db } from "@/lib/db";
 import { sendWhatsAppMessage } from "@/lib/twilio/send-message";
 
-// Helper types
+// ── mock helpers ─────────────────────────────────────────────────────────────
 type MockFn = ReturnType<typeof vi.fn>;
-const mockFindMany = () => db.scheduledAction.findMany as MockFn;
-const mockFindUnique = () => db.scheduledAction.findUnique as MockFn;
-const mockUpdateMany = () => db.scheduledAction.updateMany as MockFn;
-const mockUpdate = () => db.scheduledAction.update as MockFn;
-const mockLeadFindUnique = () => db.lead.findUnique as MockFn;
-const mockLeadUpdate = () => db.lead.update as MockFn;
-const mockApptFindFirst = () => db.appointment.findFirst as MockFn;
-const mockSystemEvent = () => db.systemEvent.create as MockFn;
-const mockSend = () => sendWhatsAppMessage as MockFn;
+const mFindMany = () => db.scheduledAction.findMany as MockFn;
+const mFindUnique = () => db.scheduledAction.findUnique as MockFn;
+const mUpdateMany = () => db.scheduledAction.updateMany as MockFn;
+const mUpdate = () => db.scheduledAction.update as MockFn;
+const mLeadFind = () => db.lead.findUnique as MockFn;
+const mLeadUpdate = () => db.lead.update as MockFn;
+const mApptFind = () => db.appointment.findFirst as MockFn;
+const mSysEvent = () => db.systemEvent.create as MockFn;
+const mSend = () => sendWhatsAppMessage as MockFn;
 
-// Factory for a minimal scheduled action object
 function makeAction(overrides: Record<string, unknown> = {}) {
   const now = new Date();
   return {
     id: "sa_1",
     leadId: "lead_1",
     actionType: "INCOMPLETE_CONVERSATION" as const,
-    scheduledAt: new Date(now.getTime() - 10_000), // 10 seconds ago = due
+    scheduledAt: new Date(now.getTime() - 10_000),
     status: "PENDING" as const,
     attemptCount: 0,
     lastError: null,
@@ -53,157 +59,65 @@ function makeAction(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * Sets up all db mocks for a successful send path.
+ * NOTE: db.scheduledAction.findUnique is called TWICE per action:
+ *   1. To get the PROCESSING-state action before processAction
+ *   2. To read final status for result counting
+ * Use mockResolvedValueOnce for both calls in sequence.
+ */
 function setupSuccessfulSend(action: ReturnType<typeof makeAction>) {
-  mockFindMany().mockResolvedValue([action]);
-  mockUpdateMany().mockResolvedValue({ count: 1 });
-  mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-  mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
-  mockApptFindFirst().mockResolvedValue(null);
-  mockLeadUpdate().mockResolvedValue({});
-  mockSystemEvent().mockResolvedValue({});
-  mockUpdate().mockResolvedValue({ ...action, status: "COMPLETED" });
+  mFindMany().mockResolvedValue([action]);
+  mUpdateMany().mockResolvedValue({ count: 1 });
+  // Call 1: PROCESSING state (used by processAction)
+  mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+  // Call 2: final status for result counting
+  mFindUnique().mockResolvedValueOnce({ ...action, status: "COMPLETED" });
+  mLeadFind().mockResolvedValue(makeLead({ id: action.leadId }));
+  mApptFind().mockResolvedValue(null);
+  mLeadUpdate().mockResolvedValue({});
+  mSysEvent().mockResolvedValue({});
+  mUpdate().mockResolvedValue({ ...action, status: "COMPLETED", completedAt: new Date() });
+  // Explicitly reset send mock so prior test's mockRejectedValue doesn't bleed in
+  mSend().mockResolvedValue({ id: "msg_ok" });
+}
+
+function setupCancelPath(action: ReturnType<typeof makeAction>) {
+  mFindMany().mockResolvedValue([action]);
+  mUpdateMany().mockResolvedValue({ count: 1 });
+  mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+  mFindUnique().mockResolvedValueOnce({ ...action, status: "CANCELLED" });
+  mUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
+}
+
+function setupFailedPath(action: ReturnType<typeof makeAction>) {
+  mFindMany().mockResolvedValue([action]);
+  mUpdateMany().mockResolvedValue({ count: 1 });
+  mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+  mFindUnique().mockResolvedValueOnce({ ...action, status: "FAILED" });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.resetModules();
 });
 
-// ── retry / backoff ──────────────────────────────────────────────────────────
-
-describe("retry logic — Twilio send failure", () => {
-  it("reschedules with 5-minute backoff on first failure (attemptCount=0)", async () => {
-    const action = makeAction({ attemptCount: 0 });
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
-    mockApptFindFirst().mockResolvedValue(null);
-    mockSystemEvent().mockResolvedValue({});
-    mockLeadUpdate().mockResolvedValue({});
-
-    // Twilio fails on send
-    mockSend().mockRejectedValue(new Error("Twilio 503"));
-    // update is called twice: once by failOrRetry, once to read final status
-    mockUpdate().mockResolvedValue({ ...action, status: "PENDING", attemptCount: 1 });
-
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
-    await processDueScheduledActions();
-
-    // scheduledAction.update should be called with status PENDING and a future scheduledAt
-    const updateCall = (db.scheduledAction.update as MockFn).mock.calls.find(
-      (c) => c[0]?.data?.status === "PENDING"
-    );
-    expect(updateCall).toBeDefined();
-    const scheduledAt: Date = updateCall?.[0]?.data?.scheduledAt;
-    expect(scheduledAt instanceof Date).toBe(true);
-    // Should be ~5 minutes in the future (within 10 seconds tolerance)
-    const diffMs = scheduledAt.getTime() - Date.now();
-    expect(diffMs).toBeGreaterThan(4 * 60_000); // > 4 min
-    expect(diffMs).toBeLessThan(6 * 60_000); // < 6 min
-  });
-
-  it("reschedules with 15-minute backoff on second failure (attemptCount=1)", async () => {
-    const action = makeAction({ attemptCount: 1 });
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
-    mockApptFindFirst().mockResolvedValue(null);
-    mockSystemEvent().mockResolvedValue({});
-    mockLeadUpdate().mockResolvedValue({});
-    mockSend().mockRejectedValue(new Error("Twilio 503"));
-    mockUpdate().mockResolvedValue({ ...action, status: "PENDING", attemptCount: 2 });
-
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
-    await processDueScheduledActions();
-
-    const updateCall = (db.scheduledAction.update as MockFn).mock.calls.find(
-      (c) => c[0]?.data?.status === "PENDING"
-    );
-    expect(updateCall).toBeDefined();
-    const scheduledAt: Date = updateCall?.[0]?.data?.scheduledAt;
-    const diffMs = scheduledAt.getTime() - Date.now();
-    expect(diffMs).toBeGreaterThan(14 * 60_000); // > 14 min
-    expect(diffMs).toBeLessThan(16 * 60_000); // < 16 min
-  });
-
-  it("sets status=FAILED after 3 failures (attemptCount=2 → 3 >= MAX_ATTEMPTS)", async () => {
-    const action = makeAction({ attemptCount: 2 });
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
-    mockApptFindFirst().mockResolvedValue(null);
-    mockSystemEvent().mockResolvedValue({});
-    mockLeadUpdate().mockResolvedValue({});
-    mockSend().mockRejectedValue(new Error("Twilio 503"));
-    mockUpdate().mockResolvedValue({ ...action, status: "FAILED", attemptCount: 3 });
-
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
-    await processDueScheduledActions();
-
-    const failCall = (db.scheduledAction.update as MockFn).mock.calls.find(
-      (c) => c[0]?.data?.status === "FAILED"
-    );
-    expect(failCall).toBeDefined();
-    expect(failCall?.[0]?.data?.attemptCount).toBe(3);
-    // FAILED actions must have a completedAt
-    expect(failCall?.[0]?.data?.completedAt).toBeTruthy();
-  });
-
-  it("does NOT retry after FAILED — result.failed is 1", async () => {
-    const action = makeAction({ attemptCount: 2 });
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
-    mockApptFindFirst().mockResolvedValue(null);
-    mockSystemEvent().mockResolvedValue({});
-    mockLeadUpdate().mockResolvedValue({});
-    mockSend().mockRejectedValue(new Error("fatal error"));
-    mockUpdate().mockResolvedValue({ ...action, status: "FAILED" });
-
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
-    const result = await processDueScheduledActions();
-    expect(result.failed).toBe(1);
-    expect(result.processed).toBe(0);
-  });
-});
-
-// ── future action is NOT processed ──────────────────────────────────────────
+// ── time gating ──────────────────────────────────────────────────────────────
 
 describe("scheduling time gating", () => {
-  it("returns early with zero processed when no actions are due", async () => {
-    // findMany returns empty → nothing to process
-    mockFindMany().mockResolvedValue([]);
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
+  it("returns zero counts when no actions are due (findMany returns empty)", async () => {
+    mFindMany().mockResolvedValue([]);
     const result = await processDueScheduledActions();
-    expect(result.processed).toBe(0);
-    expect(result.cancelled).toBe(0);
-    expect(result.failed).toBe(0);
+    expect(result).toEqual({ processed: 0, cancelled: 0, failed: 0, errors: [] });
     expect(db.scheduledAction.updateMany).not.toHaveBeenCalled();
   });
 
-  it("findMany is called with scheduledAt lte filter", async () => {
-    mockFindMany().mockResolvedValue([]);
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
+  it("findMany is called with status=PENDING and scheduledAt lte filter", async () => {
+    mFindMany().mockResolvedValue([]);
     await processDueScheduledActions();
     expect(db.scheduledAction.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
+          status: "PENDING",
           scheduledAt: expect.objectContaining({ lte: expect.any(Date) }),
         }),
       })
@@ -211,28 +125,94 @@ describe("scheduling time gating", () => {
   });
 });
 
-// ── guard-based cancellation ─────────────────────────────────────────────────
+// ── retry / backoff ──────────────────────────────────────────────────────────
+
+describe("retry logic — Twilio send failure", () => {
+  it("reschedules with ~5-minute backoff on first failure (attemptCount=0)", async () => {
+    const action = makeAction({ attemptCount: 0 });
+    mFindMany().mockResolvedValue([action]);
+    mUpdateMany().mockResolvedValue({ count: 1 });
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "PENDING", attemptCount: 1 });
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId }));
+    mApptFind().mockResolvedValue(null);
+    mSysEvent().mockResolvedValue({});
+    mLeadUpdate().mockResolvedValue({});
+    mSend().mockRejectedValue(new Error("Twilio 503"));
+    mUpdate().mockResolvedValue({ ...action, status: "PENDING", attemptCount: 1 });
+
+    await processDueScheduledActions();
+
+    const updateCall = (db.scheduledAction.update as MockFn).mock.calls.find(
+      (c) => c[0]?.data?.status === "PENDING"
+    );
+    expect(updateCall).toBeDefined();
+    const scheduledAt: Date = updateCall?.[0]?.data?.scheduledAt;
+    expect(scheduledAt instanceof Date).toBe(true);
+    const diffMs = scheduledAt.getTime() - Date.now();
+    expect(diffMs).toBeGreaterThan(4 * 60_000);
+    expect(diffMs).toBeLessThan(6 * 60_000);
+  });
+
+  it("reschedules with ~15-minute backoff on second failure (attemptCount=1)", async () => {
+    const action = makeAction({ attemptCount: 1 });
+    mFindMany().mockResolvedValue([action]);
+    mUpdateMany().mockResolvedValue({ count: 1 });
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "PENDING", attemptCount: 2 });
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId }));
+    mApptFind().mockResolvedValue(null);
+    mSysEvent().mockResolvedValue({});
+    mLeadUpdate().mockResolvedValue({});
+    mSend().mockRejectedValue(new Error("Twilio 503"));
+    mUpdate().mockResolvedValue({ ...action, status: "PENDING", attemptCount: 2 });
+
+    await processDueScheduledActions();
+
+    const updateCall = (db.scheduledAction.update as MockFn).mock.calls.find(
+      (c) => c[0]?.data?.status === "PENDING"
+    );
+    const scheduledAt: Date = updateCall?.[0]?.data?.scheduledAt;
+    const diffMs = scheduledAt.getTime() - Date.now();
+    expect(diffMs).toBeGreaterThan(14 * 60_000);
+    expect(diffMs).toBeLessThan(16 * 60_000);
+  });
+
+  it("sets status=FAILED after 3 failures (attemptCount=2)", async () => {
+    const action = makeAction({ attemptCount: 2 });
+    setupFailedPath(action);
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId }));
+    mApptFind().mockResolvedValue(null);
+    mSysEvent().mockResolvedValue({});
+    mLeadUpdate().mockResolvedValue({});
+    mSend().mockRejectedValue(new Error("Twilio 503"));
+    mUpdate().mockResolvedValue({ ...action, status: "FAILED", attemptCount: 3, completedAt: new Date() });
+
+    const result = await processDueScheduledActions();
+
+    const failCall = (db.scheduledAction.update as MockFn).mock.calls.find(
+      (c) => c[0]?.data?.status === "FAILED"
+    );
+    expect(failCall).toBeDefined();
+    expect(failCall?.[0]?.data?.attemptCount).toBe(3);
+    expect(failCall?.[0]?.data?.completedAt).toBeTruthy();
+    expect(result.failed).toBe(1);
+    expect(result.processed).toBe(0);
+  });
+});
+
+// ── guard cancellation — opted-out ───────────────────────────────────────────
 
 describe("guard cancellation — opted-out lead", () => {
   it("cancels (not fails) the action when lead.optedOut=true", async () => {
     const action = makeAction();
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(
-      makeLead({ id: action.leadId, optedOut: true })
-    );
-    mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
+    setupCancelPath(action);
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId, optedOut: true }));
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
 
     expect(result.cancelled).toBe(1);
-    // sendWhatsAppMessage must NOT have been called
-    expect(mockSend()).not.toHaveBeenCalled();
-    // action.update must have been called with status=CANCELLED
+    expect(mSend()).not.toHaveBeenCalled();
     const cancelCall = (db.scheduledAction.update as MockFn).mock.calls.find(
       (c) => c[0]?.data?.status === "CANCELLED"
     );
@@ -241,144 +221,97 @@ describe("guard cancellation — opted-out lead", () => {
   });
 });
 
+// ── guard cancellation — bot paused ─────────────────────────────────────────
+
 describe("guard cancellation — bot paused", () => {
   it("cancels the action when lead.botPaused=true", async () => {
     const action = makeAction();
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(
-      makeLead({ id: action.leadId, botPaused: true })
-    );
-    mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
+    setupCancelPath(action);
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId, botPaused: true }));
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
 
     expect(result.cancelled).toBe(1);
-    expect(mockSend()).not.toHaveBeenCalled();
+    expect(mSend()).not.toHaveBeenCalled();
+    const cancelCall = (db.scheduledAction.update as MockFn).mock.calls.find(
+      (c) => c[0]?.data?.status === "CANCELLED"
+    );
+    expect(cancelCall?.[0]?.data?.lastError).toBe("bot_paused");
   });
 });
 
-describe("guard cancellation — lead completed/stopped", () => {
+// ── guard cancellation — lead status ─────────────────────────────────────────
+
+describe("guard cancellation — lead status closed", () => {
   it("cancels the action when lead.status=COMPLETED", async () => {
     const action = makeAction();
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(
-      makeLead({ id: action.leadId, status: "COMPLETED" })
-    );
-    mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
+    setupCancelPath(action);
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId, status: "COMPLETED" }));
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
-
     expect(result.cancelled).toBe(1);
-    expect(mockSend()).not.toHaveBeenCalled();
+    expect(mSend()).not.toHaveBeenCalled();
   });
 
   it("cancels the action when lead.status=STOPPED", async () => {
     const action = makeAction();
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(
-      makeLead({ id: action.leadId, status: "STOPPED" })
-    );
-    mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
+    setupCancelPath(action);
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId, status: "STOPPED" }));
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
-
     expect(result.cancelled).toBe(1);
-    expect(mockSend()).not.toHaveBeenCalled();
+    expect(mSend()).not.toHaveBeenCalled();
   });
 });
 
+// ── guard cancellation — customer replied ─────────────────────────────────────
+
 describe("guard cancellation — customer replied", () => {
-  it("cancels INCOMPLETE_CONVERSATION when customer replied after action was created", async () => {
+  it("cancels INCOMPLETE_CONVERSATION when customer replied AFTER action was created", async () => {
     const createdAt = new Date("2026-06-18T10:00:00Z");
-    const replyAt = new Date("2026-06-18T11:00:00Z"); // after createdAt
-    const action = makeAction({
-      actionType: "INCOMPLETE_CONVERSATION",
-      createdAt,
-    });
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    mockLeadFindUnique().mockResolvedValue(
+    const replyAt = new Date("2026-06-18T11:00:00Z");
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
+    setupCancelPath(action);
+    mLeadFind().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
     );
-    mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
-
     expect(result.cancelled).toBe(1);
-    expect(mockSend()).not.toHaveBeenCalled();
+    expect(mSend()).not.toHaveBeenCalled();
   });
 
   it("sends INCOMPLETE_CONVERSATION when customer replied BEFORE action was created", async () => {
     const createdAt = new Date("2026-06-18T10:00:00Z");
-    const replyAt = new Date("2026-06-18T09:00:00Z"); // before createdAt
-    const action = makeAction({
-      actionType: "INCOMPLETE_CONVERSATION",
-      createdAt,
-    });
+    const replyAt = new Date("2026-06-18T09:00:00Z");
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
     setupSuccessfulSend(action);
-    mockLeadFindUnique().mockResolvedValue(
+    mLeadFind().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
     );
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
-
-    expect(mockSend()).toHaveBeenCalledOnce();
+    expect(mSend()).toHaveBeenCalledOnce();
     expect(result.processed).toBe(1);
   });
 });
 
-// ── successful send ───────────────────────────────────────────────────────────
+// ── successful send ──────────────────────────────────────────────────────────
 
 describe("successful action processing", () => {
-  it("marks action COMPLETED and increments followUpCount", async () => {
+  it("marks action COMPLETED, increments followUpCount, and creates system event", async () => {
     const action = makeAction();
     setupSuccessfulSend(action);
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
     const result = await processDueScheduledActions();
 
-    expect(mockSend()).toHaveBeenCalledOnce();
+    expect(mSend()).toHaveBeenCalledOnce();
     expect(result.processed).toBe(1);
 
-    // lead.update should have been called to increment followUpCount
     const leadUpdateCall = (db.lead.update as MockFn).mock.calls.find(
       (c) => c[0]?.data?.followUpCount !== undefined
     );
     expect(leadUpdateCall).toBeDefined();
-  });
-
-  it("creates a system_events row on success", async () => {
-    const action = makeAction();
-    setupSuccessfulSend(action);
-
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
-    await processDueScheduledActions();
 
     expect(db.systemEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -386,27 +319,34 @@ describe("successful action processing", () => {
       })
     );
   });
+
+  it("send includes the lead phone number as 'to'", async () => {
+    const action = makeAction();
+    setupSuccessfulSend(action);
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId, phoneNumber: "+447911000001" }));
+
+    await processDueScheduledActions();
+    expect(mSend()).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "+447911000001" })
+    );
+  });
 });
 
 // ── deleted lead ──────────────────────────────────────────────────────────────
 
 describe("deleted lead handling", () => {
-  it("cancels the action gracefully when the lead no longer exists in DB", async () => {
+  it("cancels the action gracefully when lead no longer exists", async () => {
     const action = makeAction();
-    mockFindMany().mockResolvedValue([action]);
-    mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
-    // lead has been deleted
-    mockLeadFindUnique().mockResolvedValue(null);
-    mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
+    mFindMany().mockResolvedValue([action]);
+    mUpdateMany().mockResolvedValue({ count: 1 });
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "CANCELLED" });
+    mLeadFind().mockResolvedValue(null); // lead deleted
+    mUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
 
-    const { processDueScheduledActions } = await import(
-      "@/lib/scheduled-actions/process"
-    );
-    // Must NOT throw
     const result = await processDueScheduledActions();
-    expect(mockSend()).not.toHaveBeenCalled();
-    // The action should be cancelled (not errored)
+
+    expect(mSend()).not.toHaveBeenCalled();
     const cancelCall = (db.scheduledAction.update as MockFn).mock.calls.find(
       (c) => c[0]?.data?.status === "CANCELLED"
     );
@@ -418,16 +358,12 @@ describe("deleted lead handling", () => {
 
 describe("scheduleIncompleteConversationFollowUp", () => {
   beforeEach(() => {
-    (db.scheduledAction.updateMany as MockFn).mockResolvedValue({ count: 0 });
+    mUpdateMany().mockResolvedValue({ count: 0 });
     (db.scheduledAction.create as MockFn).mockResolvedValue({ id: "sa_new" });
   });
 
-  it("cancels existing PENDING INCOMPLETE_CONVERSATION actions before creating a new one", async () => {
-    const { scheduleIncompleteConversationFollowUp } = await import(
-      "@/lib/scheduled-actions/process"
-    );
+  it("cancels existing PENDING INCOMPLETE_CONVERSATION actions first", async () => {
     await scheduleIncompleteConversationFollowUp("lead_1");
-
     expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -440,12 +376,8 @@ describe("scheduleIncompleteConversationFollowUp", () => {
     );
   });
 
-  it("creates a new PENDING action with the correct type", async () => {
-    const { scheduleIncompleteConversationFollowUp } = await import(
-      "@/lib/scheduled-actions/process"
-    );
+  it("creates a new PENDING INCOMPLETE_CONVERSATION action", async () => {
     await scheduleIncompleteConversationFollowUp("lead_1");
-
     expect(db.scheduledAction.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -457,26 +389,57 @@ describe("scheduleIncompleteConversationFollowUp", () => {
     );
   });
 
-  it("schedules the action in the future (not in the past)", async () => {
-    const { scheduleIncompleteConversationFollowUp } = await import(
-      "@/lib/scheduled-actions/process"
-    );
+  it("schedules the action in the future", async () => {
     await scheduleIncompleteConversationFollowUp("lead_1");
-
     const createCall = (db.scheduledAction.create as MockFn).mock.calls[0];
     const scheduledAt: Date = createCall?.[0]?.data?.scheduledAt;
     expect(scheduledAt.getTime()).toBeGreaterThan(Date.now());
   });
 });
 
+describe("scheduleAppointmentReminder", () => {
+  beforeEach(() => {
+    mUpdateMany().mockResolvedValue({ count: 0 });
+    (db.scheduledAction.create as MockFn).mockResolvedValue({ id: "sa_rem" });
+  });
+
+  it("cancels existing PENDING APPOINTMENT_REMINDER actions first", async () => {
+    const futureAppt = new Date(Date.now() + 5 * 60 * 60_000); // 5 hours from now
+    await scheduleAppointmentReminder("lead_1", futureAppt);
+    expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          leadId: "lead_1",
+          actionType: "APPOINTMENT_REMINDER",
+          status: "PENDING",
+        }),
+      })
+    );
+  });
+
+  it("creates a reminder scheduled BEFORE the appointment (2 hours before by default)", async () => {
+    const futureAppt = new Date(Date.now() + 5 * 60 * 60_000);
+    await scheduleAppointmentReminder("lead_1", futureAppt);
+    const createCall = (db.scheduledAction.create as MockFn).mock.calls[0];
+    const scheduledAt: Date = createCall?.[0]?.data?.scheduledAt;
+    expect(scheduledAt.getTime()).toBeLessThan(futureAppt.getTime());
+    // Should be ~3 hours from now (5 hours - 2 hours)
+    const diffToNow = scheduledAt.getTime() - Date.now();
+    expect(diffToNow).toBeGreaterThan(2.5 * 60 * 60_000);
+  });
+
+  it("does NOT create a reminder when appointment is too soon (reminderAt already past)", async () => {
+    const tooSoonAppt = new Date(Date.now() + 30 * 60_000); // only 30 min away
+    await scheduleAppointmentReminder("lead_1", tooSoonAppt);
+    // Reminder would be at -90 min (past) — should not create
+    expect(db.scheduledAction.create).not.toHaveBeenCalled();
+  });
+});
+
 describe("cancelPendingFollowUps", () => {
   it("cancels all PENDING actions for the given lead", async () => {
-    (db.scheduledAction.updateMany as MockFn).mockResolvedValue({ count: 3 });
-    const { cancelPendingFollowUps } = await import(
-      "@/lib/scheduled-actions/process"
-    );
+    mUpdateMany().mockResolvedValue({ count: 3 });
     await cancelPendingFollowUps("lead_xyz");
-
     expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ leadId: "lead_xyz", status: "PENDING" }),
