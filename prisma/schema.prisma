@@ -1,0 +1,183 @@
+// Raf WhatsApp Debt-Support Bot — database schema
+// Five tables only, per spec section 8. Do not add tables without updating the spec.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum LeadStatus {
+  ACTIVE
+  BOOKED
+  MISSED
+  NEEDS_REVIEW
+  COMPLETED
+  STOPPED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum SenderType {
+  CUSTOMER
+  BOT
+  HUMAN
+}
+
+enum AppointmentStatus {
+  BOOKED
+  MISSED
+  COMPLETED
+  CANCELLED
+}
+
+enum ScheduledActionType {
+  INCOMPLETE_CONVERSATION
+  APPOINTMENT_REMINDER
+  MISSED_CALLBACK
+}
+
+enum ScheduledActionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+model Lead {
+  id          String @id @default(cuid())
+  phoneNumber String @unique
+  preferredName String?
+
+  status           LeadStatus @default(ACTIVE)
+  conversationStage String    @default("NEW")
+
+  debtTypes      String[] @default([])
+  estimatedDebt    Float?
+  creditorCount    Int?
+  monthlyPayment   Float?
+
+  region             String?
+  housingStatus      String?
+  employmentStatus   String?
+  dependantSummary   String?
+  motivation         String?
+
+  // Optional disclosures, stored only when voluntarily provided (spec section 7)
+  paymentArrears       Boolean? 
+  bailiffInvolvement   Boolean?
+  courtAction          Boolean?
+  carFinanceConcern    Boolean?
+  recentIncomeLoss     Boolean?
+  relationshipBreakdown Boolean?
+  businessDebtConcern  Boolean?
+
+  callbackConsent Boolean @default(false)
+  optedOut        Boolean @default(false)
+  botPaused       Boolean @default(false)
+
+  vulnerabilityLevel Int      @default(0)
+  vulnerabilityFlags String[] @default([])
+
+  followUpCount          Int       @default(0)
+  lastCustomerMessageAt  DateTime?
+  lastBotMessageAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages         Message[]
+  appointments     Appointment[]
+  scheduledActions ScheduledAction[]
+  systemEvents     SystemEvent[]
+
+  @@index([status])
+  @@index([optedOut])
+}
+
+model Message {
+  id               String @id @default(cuid())
+  leadId           String
+  twilioMessageSid String @unique
+
+  direction  MessageDirection
+  senderType SenderType
+
+  body            String
+  detectedIntent  String?
+  extractedData   Json?
+
+  promptVersion   String?
+  model           String?
+  deliveryStatus  String?
+
+  createdAt DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+}
+
+model Appointment {
+  id            String @id @default(cuid())
+  leadId        String
+  googleEventId String @unique
+
+  startAt  DateTime
+  endAt    DateTime
+  timezone String   @default("Europe/London")
+
+  status AppointmentStatus @default(BOOKED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([startAt])
+  @@index([status])
+}
+
+model ScheduledAction {
+  id     String @id @default(cuid())
+  leadId String
+
+  actionType ScheduledActionType
+
+  scheduledAt DateTime
+  status      ScheduledActionStatus @default(PENDING)
+
+  attemptCount Int     @default(0)
+  lastError    String?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([status, scheduledAt])
+  @@index([leadId])
+}
+
+model SystemEvent {
+  id     String  @id @default(cuid())
+  leadId String?
+
+  eventType String
+  detail    Json?
+
+  createdAt DateTime @default(now())
+
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@index([eventType])
+}
