@@ -1,5 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { bookCallback, rescheduleCallback } from "@/lib/calendar/booking";
+import { combineDateAndTime } from "@/lib/calendar/timezone";
+import {
+  scheduleAppointmentReminder,
+  cancelPendingFollowUps,
+} from "@/lib/scheduled-actions/process";
 
 async function logEvent(leadId: string, eventType: string, detail?: Prisma.InputJsonValue) {
   await db.systemEvent.create({ data: { leadId, eventType, detail: detail ?? {} } });
@@ -73,13 +79,47 @@ export async function stopMessages(leadId: string) {
 }
 
 /**
- * Booking/rescheduling requires the Google Calendar free/busy check described
- * in spec section 14. That integration is built in Phase 4 — this throws a
- * clear error so the dashboard can show "not available yet" rather than
- * silently doing nothing or faking a booking.
+ * Book or reschedule a callback from the dashboard (spec §14, Phase 4).
+ * dateStr = "YYYY-MM-DD", timeStr = "HH:MM" (Europe/London wall-clock).
  */
-export async function bookOrRescheduleCallback(): Promise<never> {
-  throw new Error(
-    "Calendar booking is not wired up yet — this ships in Phase 4 (Google Calendar integration)."
-  );
+export async function bookOrRescheduleCallback(
+  leadId: string,
+  dateStr: string,
+  timeStr: string
+): Promise<void> {
+  const lead = await db.lead.findUniqueOrThrow({ where: { id: leadId } });
+
+  const start = combineDateAndTime(dateStr, timeStr);
+  if (!start) {
+    throw new Error(`Invalid date/time: ${dateStr} ${timeStr}`);
+  }
+
+  // Check for an existing booked appointment to reschedule.
+  const existing = await db.appointment.findFirst({
+    where: { leadId, status: "BOOKED" },
+    orderBy: { startAt: "desc" },
+  });
+
+  let newStart: Date;
+  if (existing) {
+    const appt = await rescheduleCallback(existing.id, start);
+    newStart = appt.startAt;
+    await logEvent(leadId, "appointment_changed", {
+      appointmentId: appt.id,
+      startAt: newStart.toISOString(),
+      source: "dashboard",
+    });
+  } else {
+    const appt = await bookCallback(lead, start);
+    newStart = appt.startAt;
+    await logEvent(leadId, "appointment_booked", {
+      appointmentId: appt.id,
+      startAt: newStart.toISOString(),
+      source: "dashboard",
+    });
+  }
+
+  // Cancel any pending incomplete-conversation follow-ups and schedule a reminder.
+  await cancelPendingFollowUps(leadId);
+  await scheduleAppointmentReminder(leadId, newStart);
 }

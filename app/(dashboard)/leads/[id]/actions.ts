@@ -33,3 +33,14 @@ export async function stopMessagesAction(leadId: string) {
   await mutations.stopMessages(leadId);
   await refresh(leadId);
 }
+
+export async function bookCallbackAction(
+  leadId: string,
+  formData: FormData
+): Promise<void> {
+  const date = (formData.get("date") as string | null) ?? "";
+  const time = (formData.get("time") as string | null) ?? "";
+  if (!date || !time) throw new Error("Date and time are required.");
+  await mutations.bookOrRescheduleCallback(leadId, date, time);
+  await refresh(leadId);
+}

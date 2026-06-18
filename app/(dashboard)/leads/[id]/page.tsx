@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { formatDateTime, formatGBP, formatPhone } from "@/lib/format";
 import { StatusBadge } from "../../status-badge";
 import {
+  bookCallbackAction,
   markCompletedAction,
   markMissedAction,
   pauseBotAction,
@@ -114,19 +115,38 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         </div>
       )}
 
-      <div className="mb-8 flex flex-wrap gap-2">
+      <div className="mb-8 flex flex-wrap items-start gap-2">
         {lead.botPaused ? (
           <ActionButton action={resumeBotAction} leadId={lead.id} label="Resume bot" />
         ) : (
           <ActionButton action={pauseBotAction} leadId={lead.id} label="Pause bot" />
         )}
-        <ActionButton
-          leadId={lead.id}
-          label="Book / reschedule callback"
-          variant="ghost"
-          disabled
-          title="Ships in Phase 4 once Google Calendar is wired up"
-        />
+        <form
+          action={async (fd: FormData) => {
+            "use server";
+            await bookCallbackAction(lead.id, fd);
+          }}
+          className="flex items-center gap-1"
+        >
+          <input
+            type="date"
+            name="date"
+            required
+            className="focus-ring rounded-md border border-line px-2 py-1 text-sm text-ink"
+          />
+          <input
+            type="time"
+            name="time"
+            required
+            className="focus-ring rounded-md border border-line px-2 py-1 text-sm text-ink"
+          />
+          <button
+            type="submit"
+            className="focus-ring rounded-md border border-line bg-white px-3 py-1.5 text-sm font-medium text-ink transition hover:bg-paper"
+          >
+            Book / reschedule
+          </button>
+        </form>
         <ActionButton action={markMissedAction} leadId={lead.id} label="Mark no answer" variant="ghost" />
         <ActionButton action={markCompletedAction} leadId={lead.id} label="Mark completed" />
         <ActionButton action={stopMessagesAction} leadId={lead.id} label="Stop messages" variant="danger" />
@@ -152,8 +172,8 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
           </h3>
           <p className="text-sm text-ink/70">
             {collectedFieldCount === 0
-              ? "No details collected yet — the conversation engine populates this once Phase 3 is wired up."
-              : `${collectedFieldCount} of 9 required fields collected so far. A short AI-written summary will appear here once the conversation engine (Phase 3) is connected.`}
+              ? "No details collected yet — the bot will fill this in as it talks to the customer."
+              : `${collectedFieldCount} of 9 required fields collected so far.`}
           </p>
         </section>
 

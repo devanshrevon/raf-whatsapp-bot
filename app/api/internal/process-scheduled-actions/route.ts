@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { env } from "@/lib/env";
+import { processDueScheduledActions } from "@/lib/scheduled-actions/process";
+
+export const dynamic = "force-dynamic";
 
 /**
- * Railway cron calls this every 5–10 minutes (spec section 17).
- * The secret-header check is real and live now. The actual processing loop
- * (claim PENDING scheduled_actions, check opt-out/pause/appointment state,
- * send the message, mark COMPLETED/FAILED) ships in Phase 5 — see
- * lib/scheduled-actions/process.ts.
+ * Railway cron calls this every 5–10 minutes (spec §17).
+ * The secret-header check is real. The body processes all PENDING
+ * scheduled_actions whose scheduledAt <= now.
  */
 export async function POST(request: NextRequest) {
   const provided = request.headers.get("x-internal-secret");
@@ -15,8 +16,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  return NextResponse.json(
-    { error: "Not implemented yet — Phase 5 (follow-up processing)." },
-    { status: 501 }
-  );
+  try {
+    const result = await processDueScheduledActions();
+    return NextResponse.json({ ok: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("process-scheduled-actions error:", message);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }

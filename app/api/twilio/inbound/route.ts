@@ -10,6 +10,13 @@ import { toE164 } from "@/lib/twilio/phone";
 import { processInboundMessage } from "@/lib/ai/process-message";
 import type { ChatMessage } from "@/lib/ai/client";
 import { handleBookingTurn } from "@/lib/calendar/conversation-booking";
+import { isOptOut, OPT_OUT_CONFIRMATION } from "@/lib/safety/opt-out";
+import { assessVulnerability } from "@/lib/safety/vulnerability";
+import {
+  scheduleIncompleteConversationFollowUp,
+  scheduleAppointmentReminder,
+  cancelPendingFollowUps,
+} from "@/lib/scheduled-actions/process";
 
 export const dynamic = "force-dynamic";
 
@@ -38,8 +45,11 @@ async function logEvent(
 
 /**
  * Inbound WhatsApp webhook (spec §10):
- * verify → dedup → load/create lead → store inbound → opt-out/pause gate →
- * OpenAI conversation engine → persist facts → reply → (Phase 5: schedule).
+ * verify → dedup → load/create lead → store inbound →
+ * opt-out gate (Phase 6) → pause gate →
+ * vulnerability pre-scan (Phase 6) →
+ * OpenAI conversation engine → persist facts → calendar turn (Phase 4) →
+ * reply → schedule/cancel follow-ups (Phase 5).
  */
 export async function POST(request: NextRequest) {
   // 1. Verify the Twilio signature.
@@ -96,11 +106,73 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  // 5. Don't auto-reply if the customer opted out or the bot is paused
-  //    (free-text "stop" detection arrives in Phase 6).
-  if (lead.optedOut || lead.botPaused) {
+  // 5a. Opt-out detection — MUST run before the AI call (spec §21, Phase 6).
+  if (isOptOut(body)) {
+    // Already opted out — just silently acknowledge (no double confirmation).
+    if (lead.optedOut) return twiml();
+
+    // Set opted out, stop all pending actions.
+    await db.$transaction([
+      db.lead.update({
+        where: { id: lead.id },
+        data: { optedOut: true, status: "STOPPED" },
+      }),
+      db.scheduledAction.updateMany({
+        where: { leadId: lead.id, status: "PENDING" },
+        data: { status: "CANCELLED" },
+      }),
+    ]);
+
+    await logEvent(lead.id, "customer_opted_out", { trigger: body });
+
+    // Send the single approved opt-out confirmation.
+    try {
+      await sendWhatsAppMessage({
+        leadId: lead.id,
+        to: phone,
+        body: OPT_OUT_CONFIRMATION,
+        senderType: "BOT",
+      });
+    } catch {
+      /* log silently — we already recorded opted-out; don't block */
+    }
+
     return twiml();
   }
+
+  // 5b. If already opted out, silently drop (no confirmation re-send).
+  if (lead.optedOut) return twiml();
+
+  // 5c. Bot paused by Raf's team.
+  if (lead.botPaused) return twiml();
+
+  // 5d. Pre-scan the message body for vulnerability signals (Phase 6).
+  // The AI's riskLevel is the primary signal; this catches clear keyword hits
+  // that arrive before the AI has a chance to flag them.
+  const vulnScan = assessVulnerability(body);
+  if (vulnScan.level >= 2) {
+    // Immediately mark the lead for human review and pause ordinary follow-ups.
+    await db.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: "NEEDS_REVIEW",
+        vulnerabilityLevel: Math.max(lead.vulnerabilityLevel, vulnScan.level),
+        vulnerabilityFlags: Array.from(
+          new Set([...lead.vulnerabilityFlags, ...vulnScan.flags])
+        ),
+      },
+    });
+    await logEvent(lead.id, "safeguarding_flag", {
+      source: "keyword_scan",
+      level: vulnScan.level,
+      flags: vulnScan.flags,
+    });
+    // Cancel any ordinary follow-ups (spec §20 — ordinary follow-up pauses).
+    await cancelPendingFollowUps(lead.id);
+  }
+
+  // Reload lead after potential vulnerability update.
+  const freshLead = await db.lead.findUniqueOrThrow({ where: { id: lead.id } });
 
   // 6. Run the conversation engine over the recent history.
   const recent = await db.message.findMany({
@@ -113,7 +185,7 @@ export async function POST(request: NextRequest) {
     content: m.body,
   }));
 
-  const result = await processInboundMessage(lead, history);
+  const result = await processInboundMessage(freshLead, history);
 
   // 7. Persist extracted facts + new stage, and annotate the inbound message.
   const updatedLead = await db.lead.update({
@@ -130,6 +202,7 @@ export async function POST(request: NextRequest) {
 
   if (result.needsHumanReview) {
     await logEvent(lead.id, "safeguarding_flag", {
+      source: "openai",
       riskLevel: result.riskLevel,
       flags: result.riskFlags,
     });
@@ -141,6 +214,9 @@ export async function POST(request: NextRequest) {
   // 8. Calendar booking turn (Phase 4). The route owns the calendar I/O; the
   //    handler generates any slot offer / confirmation from real availability.
   let replyText = result.reply;
+  let bookingBooked = false;
+  let bookedAppointmentStart: Date | null = null;
+
   if (result.readyForBooking && !result.needsHumanReview) {
     const activeAppointment = await db.appointment.findFirst({
       where: { leadId: lead.id, status: "BOOKED" },
@@ -155,8 +231,15 @@ export async function POST(request: NextRequest) {
       if (booking.error) {
         await logEvent(lead.id, "external_api_failure", { where: "google_calendar" });
       }
-      // (Phase 5 — intern) On booking.booked, schedule an APPOINTMENT_REMINDER
-      // and cancel any INCOMPLETE_CONVERSATION follow-ups.
+      if (booking.booked) {
+        bookingBooked = true;
+        // Find the appointment that was just created.
+        const newAppt = await db.appointment.findFirst({
+          where: { leadId: lead.id, status: "BOOKED" },
+          orderBy: { createdAt: "desc" },
+        });
+        bookedAppointmentStart = newAppt?.startAt ?? null;
+      }
     }
   }
 
@@ -179,10 +262,33 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 10. TODO (Phase 5 — intern): based on result.nextStage / needsHumanReview,
-  //     schedule or cancel ScheduledActions (INCOMPLETE_CONVERSATION reminder,
-  //     APPOINTMENT_REMINDER on booking). Automated follow-ups must stay paused
-  //     when needsHumanReview is true (spec §20) and be cancelled on opt-out.
+  // 10. Phase 5 — schedule or cancel follow-ups.
+  try {
+    if (bookingBooked && bookedAppointmentStart) {
+      // Appointment just confirmed → cancel any incomplete-conversation follow-ups
+      // and schedule an appointment reminder.
+      await cancelPendingFollowUps(lead.id);
+      await scheduleAppointmentReminder(lead.id, bookedAppointmentStart);
+    } else if (
+      result.nextStage === "APPOINTMENT_BOOKED" ||
+      result.nextStage === "COMPLETED" ||
+      result.nextStage === "STOPPED" ||
+      updatedLead.optedOut
+    ) {
+      // Closed states — cancel all pending follow-ups.
+      await cancelPendingFollowUps(lead.id);
+    } else if (!result.needsHumanReview && !updatedLead.botPaused) {
+      // Active conversation — refresh the incomplete-conversation reminder
+      // (the customer just replied, so we push the clock out).
+      await scheduleIncompleteConversationFollowUp(lead.id);
+    }
+  } catch (err) {
+    // Follow-up scheduling failure is non-fatal; the cron will pick it up.
+    await logEvent(lead.id, "external_api_failure", {
+      where: "schedule_follow_up",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   return twiml();
 }
