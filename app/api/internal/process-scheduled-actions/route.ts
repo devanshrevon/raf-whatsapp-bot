@@ -11,8 +11,14 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: NextRequest) {
   const provided = request.headers.get("x-internal-secret");
+  const expected = env.internalCronSecret;
 
-  if (!provided || provided !== env.internalCronSecret) {
+  console.log("[DEBUG CRON] Received header 'x-internal-secret':", provided ? `'${provided}'` : null);
+  console.log("[DEBUG CRON] Expected env 'INTERNAL_CRON_SECRET':", expected ? `'${expected}'` : null);
+  console.log("[DEBUG CRON] Match result:", provided === expected);
+  console.log("[DEBUG CRON] Length comparison: provided=", provided?.length, "expected=", expected?.length);
+
+  if (!provided || provided !== expected) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
