@@ -27,6 +27,11 @@ export type ProcessResult = {
   model: string;
   /** True if OpenAI failed or returned unparseable JSON (caller may log it). */
   aiError: boolean;
+  // Booking signals for the route's calendar step (Phase 4). The route owns the
+  // calendar I/O so this module stays free of side effects beyond OpenAI.
+  readyForBooking: boolean;
+  availability: { date: string | null; earliestTime: string | null };
+  selectedSlotStart: string | null;
 };
 
 // Phase-6 wording pending Raf sign-off — neutral, no invented emergency/medical
@@ -45,6 +50,8 @@ function fallbackReply(step: NextStep, customerQuestion: string | null): string 
       return "From what you've told me, it would help to speak with one of Raf's team. Would you like me to arrange a callback?";
     case "COLLECT_AVAILABILITY":
       return "Great — when would generally suit you for a call? A day and rough time is fine.";
+    case "CONTINUE":
+      return "Thanks — is there anything else I can help with before your call?";
     case "ASK_FIELD":
     default:
       return step.askField?.question ?? "Could you tell me a little more about your situation?";
@@ -94,6 +101,9 @@ export async function processInboundMessage(
       promptVersion: PROMPT_VERSION,
       model,
       aiError: true,
+      readyForBooking: false,
+      availability: { date: null, earliestTime: null },
+      selectedSlotStart: null,
     };
   }
 
@@ -137,5 +147,10 @@ export async function processInboundMessage(
     promptVersion: PROMPT_VERSION,
     model,
     aiError: false,
+    // The route should attempt calendar work only when we've reached the
+    // availability step (details + consent done, nothing booked yet).
+    readyForBooking: postStep.action === "COLLECT_AVAILABILITY",
+    availability: ai.availability,
+    selectedSlotStart: ai.selectedSlotStart,
   };
 }
