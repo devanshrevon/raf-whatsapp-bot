@@ -7,6 +7,7 @@ import {
   markCompletedAction,
   markMissedAction,
   pauseBotAction,
+  reactivateLeadAction,
   resumeBotAction,
   stopMessagesAction
 } from "./actions";
@@ -166,7 +167,11 @@ export default async function LeadDetailPage({
         </form>
         <ActionButton action={markMissedAction} leadId={lead.id} label="Mark no answer" variant="ghost" />
         <ActionButton action={markCompletedAction} leadId={lead.id} label="Mark completed" />
-        <ActionButton action={stopMessagesAction} leadId={lead.id} label="Stop messages" variant="danger" />
+        {lead.optedOut || lead.status === "STOPPED" ? (
+          <ActionButton action={reactivateLeadAction} leadId={lead.id} label="Reactivate lead" />
+        ) : (
+          <ActionButton action={stopMessagesAction} leadId={lead.id} label="Stop messages" variant="danger" />
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

@@ -37,6 +37,11 @@ export async function stopMessagesAction(leadId: string) {
   await refresh(leadId);
 }
 
+export async function reactivateLeadAction(leadId: string) {
+  await mutations.reactivateLead(leadId);
+  await refresh(leadId);
+}
+
 export async function bookCallbackAction(
   leadId: string,
   formData: FormData
