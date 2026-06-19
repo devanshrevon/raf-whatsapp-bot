@@ -8,6 +8,7 @@ import { validateReply } from "@/lib/ai/validate-reply";
 import { buildSystemPrompt, PROMPT_VERSION } from "@/lib/ai/system-prompt";
 import { computeLeadUpdates } from "@/lib/conversation/apply-facts";
 import { determineNextStep, type NextStep } from "@/lib/conversation/determine-next-action";
+import { deRepeatReply } from "@/lib/conversation/anti-repeat";
 import { matchFaq } from "@/lib/conversation/faq";
 import { env } from "@/lib/env";
 
@@ -134,6 +135,11 @@ export async function processInboundMessage(
   } else {
     const check = validateReply(reply, mergedLead);
     if (!check.ok) reply = fallbackReply(postStep, ai.customerQuestion);
+    // Never send the exact same message twice in a row (avoids the "same reply
+    // to everything" loop when the customer gives non-answers).
+    const lastBot =
+      [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+    reply = deRepeatReply(reply, lastBot, postStep, mergedLead.preferredName);
   }
 
   return {
