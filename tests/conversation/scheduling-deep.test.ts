@@ -56,7 +56,6 @@ function makeAction(overrides: Record<string, unknown> = {}) {
 function setupSuccessfulSend(action: ReturnType<typeof makeAction>) {
   mockFindMany().mockResolvedValue([action]);
   mockUpdateMany().mockResolvedValue({ count: 1 });
-  mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
   mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
   mockApptFindFirst().mockResolvedValue(null);
   mockLeadUpdate().mockResolvedValue({});
@@ -65,8 +64,43 @@ function setupSuccessfulSend(action: ReturnType<typeof makeAction>) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  vi.resetModules();
+  // resetAllMocks clears call history AND implementations, so a rejection set
+  // in one test (e.g. "fatal error") can't leak into the next.
+  vi.resetAllMocks();
+  // Re-establish the happy-path send default that resetAllMocks just cleared.
+  (sendWhatsAppMessage as MockFn).mockResolvedValue({ id: "msg_ok" });
+
+  // Stateful scheduledAction.findUnique: the processor re-reads the action after
+  // processing to count the outcome, so findUnique must reflect the status set by
+  // the most recent update() on that id (default PROCESSING before any update).
+  // The action's other fields come from whatever findMany was seeded with.
+  mockFindUnique().mockImplementation(async (args: { where: { id: string } }) => {
+    const id = args?.where?.id;
+    const updateCalls = (db.scheduledAction.update as MockFn).mock.calls.filter(
+      (c) => c[0]?.where?.id === id
+    );
+    const status = updateCalls.length
+      ? updateCalls[updateCalls.length - 1][0]?.data?.status
+      : "PROCESSING";
+
+    let shape: Record<string, unknown> = {
+      id,
+      leadId: "lead_1",
+      actionType: "INCOMPLETE_CONVERSATION",
+      attemptCount: 0,
+      lastError: null,
+      createdAt: new Date(Date.now() - 86_400_000),
+      scheduledAt: new Date(),
+      completedAt: null,
+    };
+    const fmResults = (db.scheduledAction.findMany as MockFn).mock.results;
+    if (fmResults.length) {
+      const arr = await fmResults[0].value;
+      const found = Array.isArray(arr) ? arr.find((a) => a.id === id) : null;
+      if (found) shape = { ...found };
+    }
+    return { ...shape, status };
+  });
 });
 
 // ── retry / backoff ──────────────────────────────────────────────────────────
@@ -76,7 +110,6 @@ describe("retry logic — Twilio send failure", () => {
     const action = makeAction({ attemptCount: 0 });
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
     mockApptFindFirst().mockResolvedValue(null);
     mockSystemEvent().mockResolvedValue({});
@@ -109,7 +142,6 @@ describe("retry logic — Twilio send failure", () => {
     const action = makeAction({ attemptCount: 1 });
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
     mockApptFindFirst().mockResolvedValue(null);
     mockSystemEvent().mockResolvedValue({});
@@ -136,7 +168,6 @@ describe("retry logic — Twilio send failure", () => {
     const action = makeAction({ attemptCount: 2 });
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
     mockApptFindFirst().mockResolvedValue(null);
     mockSystemEvent().mockResolvedValue({});
@@ -162,7 +193,6 @@ describe("retry logic — Twilio send failure", () => {
     const action = makeAction({ attemptCount: 2 });
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(makeLead({ id: action.leadId }));
     mockApptFindFirst().mockResolvedValue(null);
     mockSystemEvent().mockResolvedValue({});
@@ -218,7 +248,6 @@ describe("guard cancellation — opted-out lead", () => {
     const action = makeAction();
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(
       makeLead({ id: action.leadId, optedOut: true })
     );
@@ -246,7 +275,6 @@ describe("guard cancellation — bot paused", () => {
     const action = makeAction();
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(
       makeLead({ id: action.leadId, botPaused: true })
     );
@@ -267,7 +295,6 @@ describe("guard cancellation — lead completed/stopped", () => {
     const action = makeAction();
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(
       makeLead({ id: action.leadId, status: "COMPLETED" })
     );
@@ -286,7 +313,6 @@ describe("guard cancellation — lead completed/stopped", () => {
     const action = makeAction();
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(
       makeLead({ id: action.leadId, status: "STOPPED" })
     );
@@ -312,7 +338,6 @@ describe("guard cancellation — customer replied", () => {
     });
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     mockLeadFindUnique().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
     );
@@ -395,7 +420,6 @@ describe("deleted lead handling", () => {
     const action = makeAction();
     mockFindMany().mockResolvedValue([action]);
     mockUpdateMany().mockResolvedValue({ count: 1 });
-    mockFindUnique().mockResolvedValue({ ...action, status: "PROCESSING" });
     // lead has been deleted
     mockLeadFindUnique().mockResolvedValue(null);
     mockUpdate().mockResolvedValue({ ...action, status: "CANCELLED" });
