@@ -1,6 +1,7 @@
 import type { Appointment, Lead } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
+  cancelCalendarEvent,
   createCalendarEvent,
   getBusyIntervals,
   updateCalendarEvent,
@@ -108,6 +109,56 @@ export async function rescheduleCallback(
       leadId: existing.leadId,
       eventType: "appointment_changed",
       detail: { appointmentId, startAt: start.toISOString() },
+    },
+  });
+
+  return appointment;
+}
+
+/**
+ * Cancel a booked callback: delete the Google event, mark the appointment
+ * CANCELLED, cancel any pending appointment reminders, and move the lead back to
+ * ACTIVE so it can be re-booked. Used by both the customer-initiated cancel flow
+ * and (potentially) the dashboard.
+ */
+export async function cancelCallback(appointmentId: string): Promise<Appointment> {
+  const existing = await db.appointment.findUniqueOrThrow({
+    where: { id: appointmentId },
+  });
+
+  // Remove the Google event first; if it's already gone, don't block the DB update.
+  try {
+    await cancelCalendarEvent(existing.googleEventId);
+  } catch {
+    /* event may already be deleted on the calendar — continue */
+  }
+
+  const appointment = await db.appointment.update({
+    where: { id: appointmentId },
+    data: { status: "CANCELLED" },
+  });
+
+  // Cancel any pending reminders for this appointment's lead.
+  await db.scheduledAction.updateMany({
+    where: {
+      leadId: existing.leadId,
+      actionType: "APPOINTMENT_REMINDER",
+      status: "PENDING",
+    },
+    data: { status: "CANCELLED" },
+  });
+
+  // Move the lead off the booked state so it can be re-booked.
+  await db.lead.update({
+    where: { id: existing.leadId },
+    data: { status: "ACTIVE", conversationStage: "READY_FOR_CALLBACK" },
+  });
+
+  await db.systemEvent.create({
+    data: {
+      leadId: existing.leadId,
+      eventType: "appointment_cancelled",
+      detail: { appointmentId },
     },
   });
 

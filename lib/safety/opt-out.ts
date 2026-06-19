@@ -20,7 +20,8 @@ const OPT_OUT_PATTERNS: RegExp[] = [
   /\bnot interested\b/i,
   /\bopt out\b/i,
   /\bopt-out\b/i,
-  /\bcancel\b/i,
+  // NB: bare "cancel" is intentionally NOT here — "cancel my appointment" is an
+  // appointment cancellation, not an opt-out (see lib/conversation/cancel-intent.ts).
 ];
 
 /**

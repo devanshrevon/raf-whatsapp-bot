@@ -11,6 +11,11 @@ import { processInboundMessage } from "@/lib/ai/process-message";
 import type { ChatMessage } from "@/lib/ai/client";
 import { handleBookingTurn } from "@/lib/calendar/conversation-booking";
 import { isOptOut, OPT_OUT_CONFIRMATION } from "@/lib/safety/opt-out";
+import {
+  isCancelAppointmentRequest,
+  CANCEL_CONFIRMATION,
+} from "@/lib/conversation/cancel-intent";
+import { cancelCallback } from "@/lib/calendar/booking";
 import { assessVulnerability } from "@/lib/safety/vulnerability";
 import {
   scheduleIncompleteConversationFollowUp,
@@ -145,6 +150,38 @@ export async function POST(request: NextRequest) {
 
   // 5c. Bot paused by Raf's team.
   if (lead.botPaused) return twiml();
+
+  // 5c-bis. Customer wants to cancel their booked callback (NOT an opt-out).
+  if (isCancelAppointmentRequest(body)) {
+    const activeAppt = await db.appointment.findFirst({
+      where: { leadId: lead.id, status: "BOOKED" },
+      orderBy: { startAt: "desc" },
+    });
+    if (activeAppt) {
+      try {
+        await cancelCallback(activeAppt.id);
+        await sendWhatsAppMessage({
+          leadId: lead.id,
+          to: phone,
+          body: CANCEL_CONFIRMATION,
+          senderType: "BOT",
+        });
+      } catch (error) {
+        await logEvent(lead.id, "external_api_failure", {
+          where: "cancel_callback",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        await sendWhatsAppMessage({
+          leadId: lead.id,
+          to: phone,
+          body: "I'm having trouble cancelling that right now — a member of the team will sort it for you.",
+          senderType: "BOT",
+        }).catch(() => {});
+      }
+      return twiml();
+    }
+    // No active appointment to cancel — fall through to the normal conversation.
+  }
 
   // 5d. Pre-scan the message body for vulnerability signals (Phase 6).
   // The AI's riskLevel is the primary signal; this catches clear keyword hits
