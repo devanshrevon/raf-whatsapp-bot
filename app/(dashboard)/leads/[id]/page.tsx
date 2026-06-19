@@ -63,7 +63,13 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-export default async function LeadDetailPage({ params }: { params: { id: string } }) {
+export default async function LeadDetailPage({
+  params,
+  searchParams
+}: {
+  params: { id: string };
+  searchParams?: { bookError?: string; booked?: string };
+}) {
   const lead = await db.lead.findUnique({
     where: { id: params.id },
     include: {
@@ -103,6 +109,17 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         )}
       </div>
       <p className="mb-6 font-mono text-sm text-ink/60">{formatPhone(lead.phoneNumber)}</p>
+
+      {searchParams?.bookError && (
+        <div className="mb-6 rounded-md border border-danger/30 bg-dangerSoft px-4 py-3">
+          <p className="text-sm font-medium text-danger">{searchParams.bookError}</p>
+        </div>
+      )}
+      {searchParams?.booked && (
+        <div className="mb-6 rounded-md border border-line bg-accentSoft px-4 py-3">
+          <p className="text-sm font-medium text-ink">Callback booked.</p>
+        </div>
+      )}
 
       {lead.vulnerabilityLevel > 0 && (
         <div className="mb-6 rounded-md border border-danger/30 bg-dangerSoft px-4 py-3">
