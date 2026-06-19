@@ -42,13 +42,17 @@ function Row({
   status: string;
 }) {
   return (
-    <li className="flex items-center justify-between px-4 py-3 text-sm hover:bg-paper">
-      <Link href={`/leads/${leadId}`} className="focus-ring font-medium text-ink hover:text-accent">
-        {name}
+    <li className="hover:bg-paper">
+      {/* The whole row is the link, so clicking anywhere opens the lead. */}
+      <Link
+        href={`/leads/${leadId}`}
+        className="focus-ring flex items-center justify-between px-4 py-3 text-sm"
+      >
+        <span className="font-medium text-ink">{name}</span>
+        <span className="font-mono text-xs text-ink/50">{formatPhone(phone)}</span>
+        <span className="text-ink/60">{formatDateTime(startAt)}</span>
+        <StatusBadge status={status} kind="appointment" />
       </Link>
-      <span className="font-mono text-xs text-ink/50">{formatPhone(phone)}</span>
-      <span className="text-ink/60">{formatDateTime(startAt)}</span>
-      <StatusBadge status={status} kind="appointment" />
     </li>
   );
 }
