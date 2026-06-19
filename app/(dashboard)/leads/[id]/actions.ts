@@ -54,10 +54,17 @@ export async function bookCallbackAction(
   try {
     await mutations.bookOrRescheduleCallback(leadId, date, time);
   } catch (err) {
-    errorMessage =
-      err instanceof SlotUnavailableError
-        ? "That time isn't available — it may be in the past, outside calling hours (9am–6pm UK), or already booked. Please try another time."
-        : "Couldn't book the callback — the calendar may be temporarily unavailable. Please try again.";
+    if (err instanceof SlotUnavailableError) {
+      errorMessage =
+        err.reason === "in_past"
+          ? "That time is in the past — please pick a future date and time."
+          : err.reason === "outside_hours"
+          ? "That time is outside calling hours. Please pick a time between 9am and 6pm (UK)."
+          : "That time is already booked — please pick another time.";
+    } else {
+      errorMessage =
+        "Couldn't book the callback — the calendar may be temporarily unavailable. Please try again.";
+    }
     await db.systemEvent
       .create({
         data: {

@@ -14,22 +14,31 @@ import { isSlotFree, isWithinBusinessHours, SLOT_DEFAULTS } from "@/lib/calendar
 
 const DURATION_MIN = SLOT_DEFAULTS.durationMinutes;
 
+export type SlotUnavailableReason = "in_past" | "outside_hours" | "busy";
+
 export class SlotUnavailableError extends Error {
-  constructor() {
-    super("That time is no longer available.");
+  reason: SlotUnavailableReason;
+  constructor(reason: SlotUnavailableReason) {
+    super(`Slot unavailable: ${reason}`);
     this.name = "SlotUnavailableError";
+    this.reason = reason;
   }
 }
 
 async function assertSlotBookable(start: Date): Promise<Date> {
   const end = new Date(start.getTime() + DURATION_MIN * 60_000);
+  // Must be in the future.
+  if (start.getTime() <= Date.now()) {
+    throw new SlotUnavailableError("in_past");
+  }
+  // Must fall within configured calling hours.
   if (!isWithinBusinessHours(start, DURATION_MIN)) {
-    throw new SlotUnavailableError();
+    throw new SlotUnavailableError("outside_hours");
   }
   // Re-check against the live calendar right before committing (spec §14).
   const busy = await getBusyIntervals(start, end);
   if (!isSlotFree(start, busy, DURATION_MIN)) {
-    throw new SlotUnavailableError();
+    throw new SlotUnavailableError("busy");
   }
   return end;
 }
