@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
-import { formatDateTime, formatGBP, formatPhone } from "@/lib/format";
+import { formatDateTime, formatGBP, formatPhone, londonDateKey } from "@/lib/format";
 import { StatusBadge } from "../../status-badge";
 import {
   bookCallbackAction,
@@ -150,12 +150,17 @@ export default async function LeadDetailPage({
             type="date"
             name="date"
             required
+            min={londonDateKey(new Date())}
             className="focus-ring rounded-md border border-line px-2 py-1 text-sm text-ink"
           />
           <input
             type="time"
             name="time"
             required
+            min="09:00"
+            max="18:00"
+            step={1800}
+            defaultValue="10:00"
             className="focus-ring rounded-md border border-line px-2 py-1 text-sm text-ink"
           />
           <button

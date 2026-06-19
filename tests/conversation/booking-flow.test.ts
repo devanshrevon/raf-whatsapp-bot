@@ -128,7 +128,7 @@ describe("handleBookingTurn — booking a selected slot", () => {
   });
 
   it("re-offers slots when the selected slot is taken (SlotUnavailableError)", async () => {
-    mockBook.mockRejectedValue(new SlotUnavailableError());
+    mockBook.mockRejectedValue(new SlotUnavailableError("busy"));
     mockSlots.mockResolvedValue([SLOT_2, SLOT_3]);
 
     const result = await handleBookingTurn({
