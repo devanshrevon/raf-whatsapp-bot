@@ -37,4 +37,14 @@ describe("determineNextStep", () => {
     expect(step.action).toBe("ESCALATE_HUMAN");
     expect(step.stage).toBe("NEEDS_HUMAN_REVIEW");
   });
+
+  it("escalates on a lead already flagged vulnerable, even when this message reads low-risk", () => {
+    // Regression (spec §20): the keyword pre-scan flags vulnerabilityLevel 2,
+    // but a later message may come through with riskLevel 0. The lead's stored
+    // level must still stop ordinary questions.
+    const flagged = makeLead({ preferredName: "Sam", vulnerabilityLevel: 2 });
+    const step = determineNextStep(flagged, 0);
+    expect(step.action).toBe("ESCALATE_HUMAN");
+    expect(step.stage).toBe("NEEDS_HUMAN_REVIEW");
+  });
 });

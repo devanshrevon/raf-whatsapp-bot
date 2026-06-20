@@ -6,10 +6,11 @@ import {
 import { parseAiResponse } from "@/lib/ai/schema";
 import { validateReply } from "@/lib/ai/validate-reply";
 import { buildSystemPrompt, PROMPT_VERSION } from "@/lib/ai/system-prompt";
-import { computeLeadUpdates } from "@/lib/conversation/apply-facts";
+import { computeLeadUpdates, detectFactConflicts } from "@/lib/conversation/apply-facts";
 import { determineNextStep, type NextStep } from "@/lib/conversation/determine-next-action";
 import { deRepeatReply } from "@/lib/conversation/anti-repeat";
 import { matchFaq } from "@/lib/conversation/faq";
+import { detectForeignCurrency } from "@/lib/conversation/currency";
 import { env } from "@/lib/env";
 
 // Core inbound pipeline (spec §10): call OpenAI once, validate the structured
@@ -33,6 +34,9 @@ export type ProcessResult = {
   readyForBooking: boolean;
   availability: { date: string | null; earliestTime: string | null };
   selectedSlotStart: string | null;
+  // Review notes the route should log as system_events (fact conflicts, foreign
+  // currency, etc.) — surfaced so contradictions/ambiguities aren't silent.
+  notes: { type: string; detail: Record<string, unknown> }[];
 };
 
 // Phase-6 wording pending Raf sign-off — neutral, no invented emergency/medical
@@ -105,6 +109,7 @@ export async function processInboundMessage(
       readyForBooking: false,
       availability: { date: null, earliestTime: null },
       selectedSlotStart: null,
+      notes: [],
     };
   }
 
@@ -112,8 +117,29 @@ export async function processInboundMessage(
   const leadUpdates = computeLeadUpdates(lead, ai.facts, correctedFields);
   const mergedLead = mergeLead(lead, leadUpdates);
 
+  const lastUserMessage =
+    [...history].reverse().find((m) => m.role === "user")?.content ?? "";
+
+  // Review notes: contradictions kept-but-flagged, and foreign-currency amounts
+  // (stored as a plain number but displayed as GBP). The route logs these.
+  const notes: { type: string; detail: Record<string, unknown> }[] = [];
+  for (const conflict of detectFactConflicts(lead, ai.facts, correctedFields)) {
+    notes.push({ type: "fact_conflict", detail: { ...conflict } });
+  }
+  const foreignCurrency = detectForeignCurrency(lastUserMessage);
+  if (foreignCurrency && ai.facts.estimatedDebt != null) {
+    notes.push({
+      type: "currency_note",
+      detail: { symbol: foreignCurrency, storedValue: ai.facts.estimatedDebt },
+    });
+  }
+
   const postStep = determineNextStep(mergedLead, ai.riskLevel);
   leadUpdates.conversationStage = postStep.stage;
+
+  // Escalation can be driven by this message's risk OR a vulnerability already
+  // on the lead (e.g. the keyword pre-scan), so key off the resolved step.
+  const escalated = postStep.action === "ESCALATE_HUMAN";
 
   if (ai.riskLevel >= 1) {
     leadUpdates.vulnerabilityLevel = Math.max(lead.vulnerabilityLevel, ai.riskLevel);
@@ -122,7 +148,7 @@ export async function processInboundMessage(
       ...ai.riskFlags,
     ]);
   }
-  if (ai.riskLevel >= 2) {
+  if (escalated) {
     leadUpdates.status = "NEEDS_REVIEW";
   }
 
@@ -133,20 +159,28 @@ export async function processInboundMessage(
     const check = validateReply(reply, mergedLead);
     if (!reply || !check.ok) reply = SAFE_HOLD_REPLY;
   } else {
-    const check = validateReply(reply, mergedLead);
-    if (!check.ok) reply = fallbackReply(postStep, ai.customerQuestion);
-    // Never send the exact same message twice in a row (avoids the "same reply
-    // to everything" loop when the customer gives non-answers).
-    const lastBot =
-      [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
-    reply = deRepeatReply(reply, lastBot, postStep, mergedLead.preferredName);
+    // Approved FAQ (spec §18): if the customer asked one of the approved
+    // questions, answer with the EXACT approved wording — never the model's
+    // paraphrase. Match the AI-extracted question first, then the raw message.
+    const faq = matchFaq(ai.customerQuestion) ?? matchFaq(lastUserMessage);
+    if (faq) {
+      reply = faq.answer;
+    } else {
+      const check = validateReply(reply, mergedLead);
+      if (!check.ok) reply = fallbackReply(postStep, ai.customerQuestion);
+      // Never send the exact same message twice in a row (avoids the "same reply
+      // to everything" loop when the customer gives non-answers).
+      const lastBot =
+        [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+      reply = deRepeatReply(reply, lastBot, postStep, mergedLead.preferredName);
+    }
   }
 
   return {
     reply,
     leadUpdates,
     nextStage: postStep.stage,
-    needsHumanReview: ai.riskLevel >= 2,
+    needsHumanReview: escalated,
     riskLevel: ai.riskLevel,
     riskFlags: ai.riskFlags,
     intent: ai.intent,
@@ -158,5 +192,6 @@ export async function processInboundMessage(
     readyForBooking: postStep.action === "COLLECT_AVAILABILITY",
     availability: ai.availability,
     selectedSlotStart: ai.selectedSlotStart,
+    notes,
   };
 }

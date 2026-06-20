@@ -1,4 +1,4 @@
-import { combineDateAndTime, londonParts } from "@/lib/calendar/timezone";
+import { combineDateAndTime, isLondonWeekend, londonParts } from "@/lib/calendar/timezone";
 
 // Pure slot calculation (spec §14). Given a date, the customer's earliest
 // preferred time, and the busy intervals from Google Calendar, produce a few
@@ -43,6 +43,10 @@ export function generateCandidateSlots(options: SlotOptions): Date[] {
   const busy = options.busy ?? [];
   const now = options.now ?? new Date();
   const earliestNotice = new Date(now.getTime() + o.leadMinutes * 60_000);
+
+  // Callbacks are weekdays only — never offer Saturday/Sunday slots (spec §14).
+  const dayStart = combineDateAndTime(o.dateStr, `${pad(o.openHour)}:00`);
+  if (!dayStart || isLondonWeekend(dayStart)) return [];
 
   // Where to start within the day: the later of business open and the
   // customer's earliest preferred time (rounded onto the step grid).
@@ -111,6 +115,9 @@ export function isWithinBusinessHours(
   openHour = DEFAULTS.openHour,
   closeHour = DEFAULTS.closeHour
 ): boolean {
+  // Weekdays only — no Saturday/Sunday callbacks (spec §14).
+  if (isLondonWeekend(start)) return false;
+
   const startParts = londonParts(start);
   const end = new Date(start.getTime() + durationMinutes * 60_000);
   const endParts = londonParts(end);

@@ -5,7 +5,11 @@
 // Exact phrases and patterns that signal a customer wants no further contact.
 // Keep this list in one place so Raf can review and extend it before launch.
 const OPT_OUT_PATTERNS: RegExp[] = [
-  /\bstop\b/i,
+  // "stop" only counts as an opt-out when the message STARTS with it (a command
+  // like "stop" / "stop please" / "stop messaging"). This avoids false-positives
+  // on conversational use such as "please don't stop helping me" or "I had to
+  // stop paying my debts".
+  /^\s*stop\b/i,
   /\bstop messaging me\b/i,
   /\bdo not contact me\b/i,
   /\bdo not message me\b/i,
@@ -13,8 +17,8 @@ const OPT_OUT_PATTERNS: RegExp[] = [
   /\bunsubscribe\b/i,
   /\bleave me alone\b/i,
   /\bno more messages\b/i,
-  /\bstop texting\b/i,
-  /\bstop contacting\b/i,
+  /^\s*stop texting\b/i,
+  /^\s*stop contacting\b/i,
   /\bdont contact me\b/i,
   /\bdon't contact me\b/i,
   /\bnot interested\b/i,

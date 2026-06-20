@@ -225,43 +225,46 @@ export async function processDueScheduledActions(): Promise<ProcessResult> {
     errors: [],
   };
 
-  // Atomically claim all PENDING actions whose scheduledAt is due (spec §17).
-  // We use updateMany to flip them to PROCESSING so a second concurrent run
-  // can't pick up the same ones.
+  // Find due PENDING actions. This is only a candidate list — each one is then
+  // claimed atomically below, so it's safe even if another cron run reads the
+  // same candidates at the same time.
   const now = new Date();
-  const claimed = await db.scheduledAction.findMany({
+  const candidates = await db.scheduledAction.findMany({
     where: { status: "PENDING", scheduledAt: { lte: now } },
     orderBy: { scheduledAt: "asc" },
     take: 50, // safety cap per cron tick
   });
 
-  if (claimed.length === 0) return result;
+  if (candidates.length === 0) return result;
 
-  // Mark all as PROCESSING in one batch.
-  await db.scheduledAction.updateMany({
-    where: { id: { in: claimed.map((a) => a.id) } },
-    data: { status: "PROCESSING" },
-  });
+  for (const candidate of candidates) {
+    // Atomic claim (spec §17): a guarded UPDATE ... WHERE id = ? AND status =
+    // 'PENDING'. Postgres serialises concurrent updates on the row, so exactly
+    // one worker flips PENDING -> PROCESSING (count === 1); any other worker
+    // sees status already PROCESSING (count === 0) and skips it. This is what
+    // prevents two cron ticks from sending the same follow-up twice.
+    const claim = await db.scheduledAction.updateMany({
+      where: { id: candidate.id, status: "PENDING" },
+      data: { status: "PROCESSING" },
+    });
+    if (claim.count === 0) continue; // another worker already claimed it
 
-  // Process each one, tracking outcomes.
-  for (const action of claimed) {
-    // Re-read with PROCESSING status so the processor sees the current state.
-    const fresh = await db.scheduledAction.findUnique({ where: { id: action.id } });
+    // We now own this action. Re-read it so the processor sees current state.
+    const fresh = await db.scheduledAction.findUnique({ where: { id: candidate.id } });
     if (!fresh) continue;
 
-    const beforeStatus = fresh.status;
     try {
       await processAction(fresh);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      result.errors.push(`action:${action.id} ${msg}`);
+      result.errors.push(`action:${candidate.id} ${msg}`);
       // Fall back to pending-retry so nothing gets permanently stuck PROCESSING.
       await failOrRetry(fresh, `unexpected_error: ${msg}`).catch(() => {});
     }
 
     // Read final status to count outcomes.
-    const final = await db.scheduledAction.findUnique({ where: { id: action.id } });
-    const status = final?.status ?? beforeStatus;
+    const final = await db.scheduledAction.findUnique({ where: { id: candidate.id } });
+    const status = final?.status;
     if (status === "COMPLETED") result.processed++;
     else if (status === "CANCELLED") result.cancelled++;
     else if (status === "FAILED") result.failed++;
