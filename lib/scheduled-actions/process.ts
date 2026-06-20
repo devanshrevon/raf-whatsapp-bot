@@ -134,6 +134,17 @@ async function processAction(action: ScheduledAction): Promise<void> {
     return;
   }
 
+  // Pre-send ownership check: confirm the row is still PROCESSING at this
+  // exact moment. If the inbound webhook cancelled it between shouldSkipAction
+  // and here (Timeline C), this update matches 0 rows and we abort silently —
+  // no schema migration needed since we write PROCESSING → PROCESSING (a
+  // no-op value, but Postgres still serialises the write and returns count).
+  const preSend = await db.scheduledAction.updateMany({
+    where: { id: action.id, status: "PROCESSING" },
+    data: { status: "PROCESSING" },
+  });
+  if (preSend.count === 0) return; // cancelled out from under us — abort
+
   // Send via Twilio.
   try {
     await sendWhatsAppMessage({

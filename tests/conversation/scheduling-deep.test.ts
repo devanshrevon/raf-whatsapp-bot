@@ -500,4 +500,39 @@ describe("atomic claim (no double-processing)", () => {
     expect(mSend()).not.toHaveBeenCalled();
     expect(result).toEqual({ processed: 0, cancelled: 0, failed: 0, errors: [] });
   });
+
+  it("regression (Timeline C): does NOT send when inbound webhook cancels action between shouldSkipAction and sendWhatsAppMessage", async () => {
+    // Reproduces the exact race:
+    //   1. Cron claims action: PENDING → PROCESSING (count=1)
+    //   2. Cron re-reads action: sees PROCESSING, calls processAction
+    //   3. processAction reads lead — looks fine, shouldSkipAction passes
+    //   4. Inbound webhook arrives, sets row to CANCELLED
+    //   5. Pre-send guard: updateMany WHERE status=PROCESSING → count=0 (already CANCELLED)
+    //   6. Cron aborts — sendWhatsAppMessage must NOT be called
+    const action = makeAction();
+
+    mFindMany().mockResolvedValue([action]);
+
+    // Call 1 (atomic claim): count=1 — cron claims it
+    // Call 2 (pre-send guard): count=0 — inbound webhook already cancelled it
+    mUpdateMany()
+      .mockResolvedValueOnce({ count: 1 })  // atomic claim succeeds
+      .mockResolvedValueOnce({ count: 0 }); // pre-send guard: row no longer PROCESSING
+
+    // Cron re-reads after claim: PROCESSING
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
+    // Final status read: CANCELLED (webhook got there first)
+    mFindUnique().mockResolvedValueOnce({ ...action, status: "CANCELLED" });
+
+    // Lead reads fine — shouldSkipAction passes
+    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId }));
+    mApptFind().mockResolvedValue(null);
+    mSysEvent().mockResolvedValue({});
+
+    const result = await processDueScheduledActions();
+
+    expect(mSend()).not.toHaveBeenCalled();
+    expect(result.cancelled).toBe(1);
+    expect(result.processed).toBe(0);
+  });
 });
