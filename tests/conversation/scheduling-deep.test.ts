@@ -297,29 +297,26 @@ describe("guard cancellation — customer replied", () => {
     expect(result.processed).toBe(1);
   });
 
-  it("regression (Bug 3): skips when lastCustomerMessageAt is between createdAt and scheduledAt", async () => {
-    // This is the exact scenario from the bug: the inbound webhook creates the
-    // scheduled action, then the customer replies again before it fires.
-    // lastCustomerMessageAt is set BEFORE the action's createdAt (same DB turn),
-    // so the old guard (> createdAt) would MISS it. The new guard (>= scheduledAt)
-    // correctly skips the action.
-    const now = new Date();
-    const scheduledAt = new Date(now.getTime() - 2_000); // action just became due
-    const createdAt = new Date(now.getTime() - 62_000); // action was created 62s ago
-    // Customer replied 30s ago — AFTER createdAt, but BEFORE scheduledAt would have fired
-    // historically, BUT still >= scheduledAt (since scheduledAt is 2s ago and reply is 30s ago:
-    // actually reply is BEFORE scheduledAt in this scenario, so it should NOT cancel.
-    // Let's make replyAt = now - 1s (AFTER scheduledAt which is now - 2s):
-    const replyAt = new Date(now.getTime() - 1_000);
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", scheduledAt, createdAt });
-    setupCancelPath(action);
-    mLeadFind().mockResolvedValue(
-      makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
+  it("regression (Bug 3): scheduleIncompleteConversationFollowUp cancels PROCESSING actions, not just PENDING", async () => {
+    // The real failure scenario from the transcript:
+    //   1. Customer message at T → webhook creates INCOMPLETE_CONVERSATION (PENDING, scheduledAt = T+1min)
+    //   2. Cron fires at T+1min → atomically claims it: PENDING → PROCESSING
+    //   3. Customer replies at T+1.5min → webhook calls scheduleIncompleteConversationFollowUp
+    //   4. Old code: updateMany WHERE status=PENDING → matches nothing (action is PROCESSING) → send fires anyway
+    //   5. New code: updateMany WHERE status IN (PENDING, PROCESSING) → cancels it in time
+    //
+    // We test the helper directly and assert it targets both statuses.
+    await scheduleIncompleteConversationFollowUp("lead_1");
+    expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          leadId: "lead_1",
+          actionType: "INCOMPLETE_CONVERSATION",
+          status: { in: ["PENDING", "PROCESSING"] },
+        }),
+        data: { status: "CANCELLED" },
+      })
     );
-
-    const result = await processDueScheduledActions();
-    expect(result.cancelled).toBe(1);
-    expect(mSend()).not.toHaveBeenCalled();
   });
 });
 
@@ -389,14 +386,14 @@ describe("scheduleIncompleteConversationFollowUp", () => {
     (db.scheduledAction.create as MockFn).mockResolvedValue({ id: "sa_new" });
   });
 
-  it("cancels existing PENDING INCOMPLETE_CONVERSATION actions first", async () => {
+  it("cancels existing PENDING and PROCESSING INCOMPLETE_CONVERSATION actions first", async () => {
     await scheduleIncompleteConversationFollowUp("lead_1");
     expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           leadId: "lead_1",
           actionType: "INCOMPLETE_CONVERSATION",
-          status: "PENDING",
+          status: { in: ["PENDING", "PROCESSING"] },
         }),
         data: { status: "CANCELLED" },
       })

@@ -297,9 +297,16 @@ const REMINDER_BEFORE_HOURS = Number(
 export async function scheduleIncompleteConversationFollowUp(
   leadId: string
 ): Promise<void> {
-  // Cancel any existing pending incomplete-conversation actions.
+  // Cancel any existing pending or in-flight incomplete-conversation actions.
+  // We cancel PROCESSING state too: if the cron claimed the action between two
+  // customer replies, a subsequent reply must still suppress it — the guard in
+  // shouldSkipAction can't help once the cron has already started the send.
   await db.scheduledAction.updateMany({
-    where: { leadId, actionType: "INCOMPLETE_CONVERSATION", status: "PENDING" },
+    where: {
+      leadId,
+      actionType: "INCOMPLETE_CONVERSATION",
+      status: { in: ["PENDING", "PROCESSING"] },
+    },
     data: { status: "CANCELLED" },
   });
 
