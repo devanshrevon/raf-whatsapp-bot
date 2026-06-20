@@ -78,7 +78,7 @@ export function buildSystemPrompt(lead: Lead, next: NextStep): string {
       break;
     case "PROPOSE_CALLBACK":
       goal =
-        "You now have the key details. Briefly suggest arranging a callback with Raf's team and check they're happy to go ahead.";
+        "You now have the key details. Briefly suggest arranging a callback with Raf's team and check they're happy to go ahead. If the customer agrees (yes/sure/ok/happy), set facts.callbackConsent to true.";
       break;
     case "COLLECT_AVAILABILITY":
       goal =

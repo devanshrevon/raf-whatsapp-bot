@@ -380,3 +380,42 @@ describe("processInboundMessage — approved FAQ wording (spec §18)", () => {
     expect(result.reply).toBe(expected);
   });
 });
+
+describe("processInboundMessage — captures answers the model misses", () => {
+  it("records a 'None' answer to the asked field so it doesn't loop", async () => {
+    // Lead has everything except dependants → the bot is asking for dependants.
+    const lead = makeCompleteLead({ dependantSummary: null, callbackConsent: false });
+    // The model fails to extract anything from "None".
+    mockAI.mockResolvedValue(
+      aiJson({ reply: "Do you have any dependants, such as children?" })
+    );
+    const result = await processInboundMessage(lead, [
+      { role: "user", content: "None" },
+    ]);
+    expect(result.leadUpdates.dependantSummary).toBe("None");
+    // Field now complete → moves on instead of re-asking dependants.
+    expect(result.nextStage).toBe("READY_FOR_CALLBACK");
+  });
+
+  it("does NOT capture a question as the field answer (lets FAQ/flow handle it)", async () => {
+    const lead = makeCompleteLead({ dependantSummary: null });
+    mockAI.mockResolvedValue(aiJson({ reply: "..." }));
+    const result = await processInboundMessage(lead, [
+      { role: "user", content: "what time do you operate?" },
+    ]);
+    expect(result.leadUpdates.dependantSummary).toBeUndefined();
+  });
+
+  it("captures consent so it doesn't loop on 'would you like a callback?'", async () => {
+    // All details collected, no consent yet → bot is proposing a callback.
+    const lead = makeCompleteLead({ callbackConsent: false });
+    mockAI.mockResolvedValue(
+      aiJson({ reply: "Would you like to arrange a callback with Raf's team?" })
+    );
+    const result = await processInboundMessage(lead, [
+      { role: "user", content: "Yes please" },
+    ]);
+    expect(result.leadUpdates.callbackConsent).toBe(true);
+    expect(result.nextStage).toBe("COLLECTING_AVAILABILITY");
+  });
+});
