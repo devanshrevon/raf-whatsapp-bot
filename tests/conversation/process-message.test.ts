@@ -84,7 +84,7 @@ describe("processInboundMessage — valid AI responses", () => {
     expect(result.reply).toBe("Thanks for that. Could you tell me roughly how much you owe?");
   });
 
-  it("extracts a single fact correctly", async () => {
+  it("extracts a single fact correctly — requires lead past NEW stage", async () => {
     mockAI.mockResolvedValue(aiJson({
       facts: { preferredName: "Louise", debtTypes: [], estimatedDebt: null,
         creditorCount: null, monthlyPayment: null, region: null,
@@ -94,8 +94,28 @@ describe("processInboundMessage — valid AI responses", () => {
         recentIncomeLoss: null, relationshipBreakdown: null, businessDebtConcern: null,
       },
     }));
-    const result = await processInboundMessage(makeLead(), []);
+    // Lead must be past "NEW" stage so the bot has already asked for the name.
+    const lead = makeLead({ conversationStage: "DISCOVERING_SITUATION" });
+    const result = await processInboundMessage(lead, []);
     expect(result.leadUpdates.preferredName).toBe("Louise");
+  });
+
+  it("regression (Bug 2): does NOT store a greeting as preferredName on first contact (stage=NEW)", async () => {
+    // A customer opens with "hey" — the model may speculatively extract it as
+    // a name, but we must NOT persist it since the bot hasn't asked yet.
+    mockAI.mockResolvedValue(aiJson({
+      facts: { preferredName: "hey", debtTypes: [], estimatedDebt: null,
+        creditorCount: null, monthlyPayment: null, region: null,
+        housingStatus: null, employmentStatus: null, dependantSummary: null,
+        motivation: null, callbackConsent: null, paymentArrears: null,
+        bailiffInvolvement: null, courtAction: null, carFinanceConcern: null,
+        recentIncomeLoss: null, relationshipBreakdown: null, businessDebtConcern: null,
+      },
+      reply: "Hi there! What name would you like me to use?",
+    }));
+    // Fresh lead — conversationStage is "NEW".
+    const result = await processInboundMessage(makeLead(), []);
+    expect(result.leadUpdates.preferredName).toBeUndefined();
   });
 
   it("extracts multiple facts from a single message", async () => {
@@ -268,6 +288,24 @@ describe("processInboundMessage — booking signals", () => {
     }));
     const result = await processInboundMessage(lead, []);
     expect(result.selectedSlotStart).toBe("2026-06-20T16:00:00.000Z");
+  });
+
+  it("regression (Bug 1): availability fields reach the caller when model returns them in COLLECT_AVAILABILITY stage", async () => {
+    // In the original bug, the output JSON schema in the system prompt was missing
+    // 'availability' and 'selectedSlotStart', so models would often omit them,
+    // causing handleBookingTurn to receive null for both and never offer real slots.
+    // This test verifies the full pipeline correctly passes them through.
+    const lead = makeCompleteLead({ callbackConsent: true });
+    mockAI.mockResolvedValue(aiJson({
+      reply: "Let me find a time that works.",
+      availability: { date: "2026-06-23", earliestTime: "17:00" },
+      selectedSlotStart: null,
+    }));
+    const result = await processInboundMessage(lead, []);
+    expect(result.readyForBooking).toBe(true);
+    expect(result.availability.date).toBe("2026-06-23");
+    expect(result.availability.earliestTime).toBe("17:00");
+    expect(result.selectedSlotStart).toBeNull();
   });
 });
 

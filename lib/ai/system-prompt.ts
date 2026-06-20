@@ -49,6 +49,8 @@ Reply ONLY with a single JSON object, no prose around it, in this shape:
   },
   "corrections": ["fieldKey the customer corrected, if any"],
   "customerQuestion": "their question text, or null",
+  "availability": { "date": null, "earliestTime": null },
+  "selectedSlotStart": null,
   "riskLevel": 0,
   "riskFlags": [],
   "suggestedNextAction": "short label",
