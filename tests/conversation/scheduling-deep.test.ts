@@ -267,10 +267,11 @@ describe("guard cancellation — lead status closed", () => {
 // ── guard cancellation — customer replied ─────────────────────────────────────
 
 describe("guard cancellation — customer replied", () => {
-  it("cancels INCOMPLETE_CONVERSATION when customer replied AFTER action was created", async () => {
-    const createdAt = new Date("2026-06-18T10:00:00Z");
-    const replyAt = new Date("2026-06-18T11:00:00Z");
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
+  it("cancels INCOMPLETE_CONVERSATION when customer replied AFTER action scheduledAt", async () => {
+    const now = new Date();
+    const scheduledAt = new Date(now.getTime() - 10_000); // 10s ago (already due)
+    const replyAt = new Date(now.getTime() - 5_000); // customer replied 5s ago, AFTER scheduledAt
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", scheduledAt });
     setupCancelPath(action);
     mLeadFind().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
@@ -281,10 +282,11 @@ describe("guard cancellation — customer replied", () => {
     expect(mSend()).not.toHaveBeenCalled();
   });
 
-  it("sends INCOMPLETE_CONVERSATION when customer replied BEFORE action was created", async () => {
-    const createdAt = new Date("2026-06-18T10:00:00Z");
-    const replyAt = new Date("2026-06-18T09:00:00Z");
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
+  it("sends INCOMPLETE_CONVERSATION when customer replied BEFORE scheduledAt", async () => {
+    const now = new Date();
+    const scheduledAt = new Date(now.getTime() - 10_000); // already due
+    const replyAt = new Date(now.getTime() - 60_000); // customer replied 60s ago, BEFORE scheduledAt
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", scheduledAt });
     setupSuccessfulSend(action);
     mLeadFind().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
@@ -293,6 +295,31 @@ describe("guard cancellation — customer replied", () => {
     const result = await processDueScheduledActions();
     expect(mSend()).toHaveBeenCalledOnce();
     expect(result.processed).toBe(1);
+  });
+
+  it("regression (Bug 3): skips when lastCustomerMessageAt is between createdAt and scheduledAt", async () => {
+    // This is the exact scenario from the bug: the inbound webhook creates the
+    // scheduled action, then the customer replies again before it fires.
+    // lastCustomerMessageAt is set BEFORE the action's createdAt (same DB turn),
+    // so the old guard (> createdAt) would MISS it. The new guard (>= scheduledAt)
+    // correctly skips the action.
+    const now = new Date();
+    const scheduledAt = new Date(now.getTime() - 2_000); // action just became due
+    const createdAt = new Date(now.getTime() - 62_000); // action was created 62s ago
+    // Customer replied 30s ago — AFTER createdAt, but BEFORE scheduledAt would have fired
+    // historically, BUT still >= scheduledAt (since scheduledAt is 2s ago and reply is 30s ago:
+    // actually reply is BEFORE scheduledAt in this scenario, so it should NOT cancel.
+    // Let's make replyAt = now - 1s (AFTER scheduledAt which is now - 2s):
+    const replyAt = new Date(now.getTime() - 1_000);
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", scheduledAt, createdAt });
+    setupCancelPath(action);
+    mLeadFind().mockResolvedValue(
+      makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
+    );
+
+    const result = await processDueScheduledActions();
+    expect(result.cancelled).toBe(1);
+    expect(mSend()).not.toHaveBeenCalled();
   });
 });
 

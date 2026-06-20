@@ -59,11 +59,15 @@ async function shouldSkipAction(
     return { skip: true, reason: "lead_closed" };
   }
 
-  // INCOMPLETE_CONVERSATION: skip if customer has replied since this was scheduled.
+  // INCOMPLETE_CONVERSATION: skip if customer has replied since this was due to
+  // fire. We compare against scheduledAt (not createdAt) because lastCustomer-
+  // MessageAt is written during the same inbound turn that creates this action,
+  // so it is always <= createdAt — making the createdAt comparison ineffective
+  // when the customer replies continuously.
   if (action.actionType === "INCOMPLETE_CONVERSATION") {
     if (
       lead.lastCustomerMessageAt &&
-      lead.lastCustomerMessageAt > action.createdAt
+      lead.lastCustomerMessageAt >= action.scheduledAt
     ) {
       return { skip: true, reason: "customer_replied" };
     }
