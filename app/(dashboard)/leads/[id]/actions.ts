@@ -90,3 +90,8 @@ export async function bookCallbackAction(
     `/leads/${leadId}?${errorMessage ? `bookError=${encodeURIComponent(errorMessage)}` : "booked=1"}`
   );
 }
+
+export async function deleteLeadCompletelyAction(leadId: string) {
+  await mutations.deleteLeadCompletely(leadId);
+  redirect("/leads");
+}

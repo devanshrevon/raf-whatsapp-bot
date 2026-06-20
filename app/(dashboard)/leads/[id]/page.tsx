@@ -9,7 +9,8 @@ import {
   pauseBotAction,
   reactivateLeadAction,
   resumeBotAction,
-  stopMessagesAction
+  stopMessagesAction,
+  deleteLeadCompletelyAction
 } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -260,6 +261,33 @@ export default async function LeadDetailPage({
           </div>
         )}
       </section>
+
+      <div className="mt-12 flex items-center justify-between border-t border-danger/20 pt-6">
+        <div>
+          <h3 className="text-sm font-semibold text-danger">Danger Zone</h3>
+          <p className="mt-1 text-xs text-ink/60">Testing only: completely wipe this lead and all its history.</p>
+        </div>
+        <form id="delete-lead-form" action={async () => {
+          "use server";
+          await deleteLeadCompletelyAction(lead.id);
+        }}>
+          <button
+            type="submit"
+            className="focus-ring rounded-md border border-danger/30 bg-dangerSoft px-4 py-2 text-sm font-medium text-danger transition hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Delete lead (testing only)
+          </button>
+        </form>
+        <script dangerouslySetInnerHTML={{
+          __html: `
+            document.getElementById('delete-lead-form').addEventListener('submit', function(e) {
+              if(!confirm('Are you sure? This permanently deletes the lead\\'s full conversation history and cannot be undone.')) {
+                e.preventDefault();
+              }
+            });
+          `
+        }} />
+      </div>
     </div>
   );
 }

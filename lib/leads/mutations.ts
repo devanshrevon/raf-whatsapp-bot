@@ -147,3 +147,15 @@ export async function bookOrRescheduleCallback(
   await cancelPendingFollowUps(leadId);
   await scheduleAppointmentReminder(leadId, newStart);
 }
+
+/**
+ * Temporary function for testing: completely deletes a lead and all associated
+ * cascading records (messages, appointments, scheduled actions). Explicitly
+ * deletes SystemEvents first as they do not cascade.
+ */
+export async function deleteLeadCompletely(leadId: string) {
+  await db.$transaction([
+    db.systemEvent.deleteMany({ where: { leadId } }),
+    db.lead.delete({ where: { id: leadId } })
+  ]);
+}
