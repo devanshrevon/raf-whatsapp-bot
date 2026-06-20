@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { processInboundMessage } from "@/lib/ai/process-message";
+import { matchFaq } from "@/lib/conversation/faq";
 import { makeLead, makeCompleteLead } from "../helpers/lead";
 
 // ── mock the only external dependency ──────────────────────────────────────
@@ -310,5 +311,34 @@ describe("processInboundMessage — stage transitions", () => {
     mockAI.mockResolvedValue(aiJson({ reply: "Is there anything else I can help with?" }));
     const result = await processInboundMessage(lead, []);
     expect(result.nextStage).toBe("APPOINTMENT_BOOKED");
+  });
+});
+
+describe("processInboundMessage — approved FAQ wording (spec §18)", () => {
+  it("uses the EXACT approved answer, not the model's paraphrase (via customerQuestion)", async () => {
+    const expected = matchFaq("Is this an IVA?")?.answer;
+    expect(expected).toBeTruthy();
+    mockAI.mockResolvedValue(
+      aiJson({
+        customerQuestion: "Is this an IVA?",
+        reply: "Not at all — this chat is just to understand your situation.",
+      })
+    );
+    const result = await processInboundMessage(makeLead({ preferredName: "Sam" }), [
+      { role: "user", content: "Is this an IVA?" },
+    ]);
+    expect(result.reply).toBe(expected);
+  });
+
+  it("matches the FAQ from the raw message when the model doesn't extract it", async () => {
+    const expected = matchFaq("do I need to give card details?")?.answer;
+    expect(expected).toBeTruthy();
+    mockAI.mockResolvedValue(
+      aiJson({ customerQuestion: null, reply: "You won't need to share anything sensitive." })
+    );
+    const result = await processInboundMessage(makeLead({ preferredName: "Sam" }), [
+      { role: "user", content: "do I need to give card details?" },
+    ]);
+    expect(result.reply).toBe(expected);
   });
 });
