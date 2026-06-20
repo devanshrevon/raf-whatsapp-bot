@@ -367,4 +367,17 @@ describe("processInboundMessage — captures answers the model misses", () => {
     ]);
     expect(result.leadUpdates.dependantSummary).toBeUndefined();
   });
+
+  it("captures consent so it doesn't loop on 'would you like a callback?'", async () => {
+    // All details collected, no consent yet → bot is proposing a callback.
+    const lead = makeCompleteLead({ callbackConsent: false });
+    mockAI.mockResolvedValue(
+      aiJson({ reply: "Would you like to arrange a callback with Raf's team?" })
+    );
+    const result = await processInboundMessage(lead, [
+      { role: "user", content: "Yes please" },
+    ]);
+    expect(result.leadUpdates.callbackConsent).toBe(true);
+    expect(result.nextStage).toBe("COLLECTING_AVAILABILITY");
+  });
 });

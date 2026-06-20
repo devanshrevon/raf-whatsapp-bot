@@ -73,6 +73,7 @@ function dedupe(values: string[]): string[] {
 }
 
 const NEGATIVE_ANSWER = /^(no|none|nope|nah|n\/?a|nothing|not really|no one|nobody)\b/i;
+const AFFIRMATIVE = /^(y(es|ep|eah|up)?|sure|ok(ay)?|alright|absolutely|definitely|of course|go ahead|sounds good|that works|happy|please do|let'?s do it)\b/i;
 
 /** A short, direct reply that's plausibly an answer to the question we asked. */
 function isPlainAnswer(text: string): boolean {
@@ -148,6 +149,19 @@ export async function processInboundMessage(
       : lastUserMessage.trim().slice(0, 80);
     (leadUpdates as Record<string, unknown>)[key] = value;
     (mergedLead as Record<string, unknown>)[key] = value;
+  }
+
+  // Capture explicit consent: when we proposed a callback and the customer
+  // agrees ("yes" / "sure" / "happy" …), record consent so we move on to
+  // availability instead of asking again.
+  if (
+    preStep.action === "PROPOSE_CALLBACK" &&
+    !mergedLead.callbackConsent &&
+    AFFIRMATIVE.test(lastUserMessage.trim()) &&
+    !matchFaq(lastUserMessage)
+  ) {
+    leadUpdates.callbackConsent = true;
+    mergedLead.callbackConsent = true;
   }
 
   // Review notes: contradictions kept-but-flagged, and foreign-currency amounts
