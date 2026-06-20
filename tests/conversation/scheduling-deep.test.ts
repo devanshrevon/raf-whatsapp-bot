@@ -448,3 +448,32 @@ describe("cancelPendingFollowUps", () => {
     );
   });
 });
+
+// ── concurrency: atomic claim ────────────────────────────────────────────────
+
+describe("atomic claim (no double-processing)", () => {
+  it("claims each action with a status-guarded update", async () => {
+    const action = makeAction();
+    setupSuccessfulSend(action);
+    await processDueScheduledActions();
+    // The claim must be guarded on status PENDING for that specific id.
+    expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: action.id, status: "PENDING" }),
+        data: { status: "PROCESSING" },
+      })
+    );
+  });
+
+  it("skips an action another worker already claimed (claim count 0) — no send", async () => {
+    const action = makeAction();
+    mFindMany().mockResolvedValue([action]);
+    // Another worker won the race: our guarded update affects 0 rows.
+    mUpdateMany().mockResolvedValue({ count: 0 });
+
+    const result = await processDueScheduledActions();
+
+    expect(mSend()).not.toHaveBeenCalled();
+    expect(result).toEqual({ processed: 0, cancelled: 0, failed: 0, errors: [] });
+  });
+});
