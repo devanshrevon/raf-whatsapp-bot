@@ -27,6 +27,17 @@ describe("isOptOut", () => {
     expect(isOptOut("I'd like a callback tomorrow")).toBe(false);
   });
 
+  it("does not false-positive on conversational use of 'stop'", () => {
+    expect(isOptOut("please don't stop helping me")).toBe(false);
+    expect(isOptOut("I had to stop paying my debts")).toBe(false);
+    expect(isOptOut("I can't stop the interest building up")).toBe(false);
+  });
+
+  it("still detects a 'stop' command at the start of the message", () => {
+    expect(isOptOut("Stop please")).toBe(true);
+    expect(isOptOut("stop messaging me")).toBe(true);
+  });
+
   it("exports the approved opt-out confirmation message", () => {
     expect(OPT_OUT_CONFIRMATION).toContain("won't send you any more messages");
   });

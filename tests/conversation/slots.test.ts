@@ -4,7 +4,11 @@ import {
   isSlotFree,
   isWithinBusinessHours,
 } from "@/lib/calendar/slots";
-import { combineDateAndTime, formatLondonTime } from "@/lib/calendar/timezone";
+import {
+  combineDateAndTime,
+  formatLondonTime,
+  londonParts,
+} from "@/lib/calendar/timezone";
 
 // A point well before the test date so "lead time" never filters slots out.
 const NOW = new Date(Date.UTC(2026, 5, 1, 9, 0));
@@ -58,6 +62,24 @@ describe("generateCandidateSlots", () => {
     expect(slots.every((s) => s.getTime() >= sameDayNow.getTime() + 60 * 60_000)).toBe(
       true
     );
+  });
+});
+
+describe("weekends are never offered", () => {
+  // 2026-06-13 is a Saturday, 2026-06-14 a Sunday (sanity-checked below).
+  it("sanity: the test dates really are a weekend", () => {
+    expect(londonParts(combineDateAndTime("2026-06-13", "10:00")!).weekday).toBe("Saturday");
+    expect(londonParts(combineDateAndTime("2026-06-14", "10:00")!).weekday).toBe("Sunday");
+  });
+
+  it("generates no slots on Saturday or Sunday", () => {
+    expect(generateCandidateSlots({ dateStr: "2026-06-13", now: NOW })).toEqual([]);
+    expect(generateCandidateSlots({ dateStr: "2026-06-14", now: NOW })).toEqual([]);
+  });
+
+  it("isWithinBusinessHours is false on a weekend, true on a weekday", () => {
+    expect(isWithinBusinessHours(combineDateAndTime("2026-06-13", "10:00")!)).toBe(false);
+    expect(isWithinBusinessHours(combineDateAndTime("2026-06-12", "10:00")!)).toBe(true); // Friday
   });
 });
 

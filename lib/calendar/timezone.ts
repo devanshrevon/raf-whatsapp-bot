@@ -131,3 +131,9 @@ export function formatLondonTime(instant: Date): string {
 export function formatLondonSlot(instant: Date): string {
   return `${formatLondonDate(instant)} at ${formatLondonTime(instant)}`;
 }
+
+/** True if the instant falls on a Saturday or Sunday in Europe/London. */
+export function isLondonWeekend(instant: Date): boolean {
+  const weekday = londonParts(instant).weekday;
+  return weekday === "Saturday" || weekday === "Sunday";
+}

@@ -248,6 +248,12 @@ export async function POST(request: NextRequest) {
     await logEvent(lead.id, "external_api_failure", { where: "openai" });
   }
 
+  // Log review notes (fact conflicts, foreign-currency amounts) so the team can
+  // see them — flagged rather than silently dropped/normalised.
+  for (const note of result.notes) {
+    await logEvent(lead.id, note.type, note.detail as Prisma.InputJsonValue);
+  }
+
   // 8. Calendar booking turn (Phase 4). The route owns the calendar I/O; the
   //    handler generates any slot offer / confirmation from real availability.
   let replyText = result.reply;
