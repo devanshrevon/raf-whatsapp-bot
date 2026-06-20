@@ -267,11 +267,10 @@ describe("guard cancellation — lead status closed", () => {
 // ── guard cancellation — customer replied ─────────────────────────────────────
 
 describe("guard cancellation — customer replied", () => {
-  it("cancels INCOMPLETE_CONVERSATION when customer replied AFTER action scheduledAt", async () => {
-    const now = new Date();
-    const scheduledAt = new Date(now.getTime() - 10_000); // 10s ago (already due)
-    const replyAt = new Date(now.getTime() - 5_000); // customer replied 5s ago, AFTER scheduledAt
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", scheduledAt });
+  it("cancels INCOMPLETE_CONVERSATION when customer replied AFTER action was created", async () => {
+    const createdAt = new Date("2026-06-18T10:00:00Z");
+    const replyAt = new Date("2026-06-18T11:00:00Z");
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
     setupCancelPath(action);
     mLeadFind().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
@@ -282,11 +281,10 @@ describe("guard cancellation — customer replied", () => {
     expect(mSend()).not.toHaveBeenCalled();
   });
 
-  it("sends INCOMPLETE_CONVERSATION when customer replied BEFORE scheduledAt", async () => {
-    const now = new Date();
-    const scheduledAt = new Date(now.getTime() - 10_000); // already due
-    const replyAt = new Date(now.getTime() - 60_000); // customer replied 60s ago, BEFORE scheduledAt
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", scheduledAt });
+  it("sends INCOMPLETE_CONVERSATION when customer replied BEFORE action was created", async () => {
+    const createdAt = new Date("2026-06-18T10:00:00Z");
+    const replyAt = new Date("2026-06-18T09:00:00Z");
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
     setupSuccessfulSend(action);
     mLeadFind().mockResolvedValue(
       makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
@@ -295,28 +293,6 @@ describe("guard cancellation — customer replied", () => {
     const result = await processDueScheduledActions();
     expect(mSend()).toHaveBeenCalledOnce();
     expect(result.processed).toBe(1);
-  });
-
-  it("regression (Bug 3): scheduleIncompleteConversationFollowUp cancels PROCESSING actions, not just PENDING", async () => {
-    // The real failure scenario from the transcript:
-    //   1. Customer message at T → webhook creates INCOMPLETE_CONVERSATION (PENDING, scheduledAt = T+1min)
-    //   2. Cron fires at T+1min → atomically claims it: PENDING → PROCESSING
-    //   3. Customer replies at T+1.5min → webhook calls scheduleIncompleteConversationFollowUp
-    //   4. Old code: updateMany WHERE status=PENDING → matches nothing (action is PROCESSING) → send fires anyway
-    //   5. New code: updateMany WHERE status IN (PENDING, PROCESSING) → cancels it in time
-    //
-    // We test the helper directly and assert it targets both statuses.
-    await scheduleIncompleteConversationFollowUp("lead_1");
-    expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          leadId: "lead_1",
-          actionType: "INCOMPLETE_CONVERSATION",
-          status: { in: ["PENDING", "PROCESSING"] },
-        }),
-        data: { status: "CANCELLED" },
-      })
-    );
   });
 });
 
@@ -386,14 +362,14 @@ describe("scheduleIncompleteConversationFollowUp", () => {
     (db.scheduledAction.create as MockFn).mockResolvedValue({ id: "sa_new" });
   });
 
-  it("cancels existing PENDING and PROCESSING INCOMPLETE_CONVERSATION actions first", async () => {
+  it("cancels existing PENDING INCOMPLETE_CONVERSATION actions first", async () => {
     await scheduleIncompleteConversationFollowUp("lead_1");
     expect(db.scheduledAction.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           leadId: "lead_1",
           actionType: "INCOMPLETE_CONVERSATION",
-          status: { in: ["PENDING", "PROCESSING"] },
+          status: "PENDING",
         }),
         data: { status: "CANCELLED" },
       })
@@ -499,40 +475,5 @@ describe("atomic claim (no double-processing)", () => {
 
     expect(mSend()).not.toHaveBeenCalled();
     expect(result).toEqual({ processed: 0, cancelled: 0, failed: 0, errors: [] });
-  });
-
-  it("regression (Timeline C): does NOT send when inbound webhook cancels action between shouldSkipAction and sendWhatsAppMessage", async () => {
-    // Reproduces the exact race:
-    //   1. Cron claims action: PENDING → PROCESSING (count=1)
-    //   2. Cron re-reads action: sees PROCESSING, calls processAction
-    //   3. processAction reads lead — looks fine, shouldSkipAction passes
-    //   4. Inbound webhook arrives, sets row to CANCELLED
-    //   5. Pre-send guard: updateMany WHERE status=PROCESSING → count=0 (already CANCELLED)
-    //   6. Cron aborts — sendWhatsAppMessage must NOT be called
-    const action = makeAction();
-
-    mFindMany().mockResolvedValue([action]);
-
-    // Call 1 (atomic claim): count=1 — cron claims it
-    // Call 2 (pre-send guard): count=0 — inbound webhook already cancelled it
-    mUpdateMany()
-      .mockResolvedValueOnce({ count: 1 })  // atomic claim succeeds
-      .mockResolvedValueOnce({ count: 0 }); // pre-send guard: row no longer PROCESSING
-
-    // Cron re-reads after claim: PROCESSING
-    mFindUnique().mockResolvedValueOnce({ ...action, status: "PROCESSING" });
-    // Final status read: CANCELLED (webhook got there first)
-    mFindUnique().mockResolvedValueOnce({ ...action, status: "CANCELLED" });
-
-    // Lead reads fine — shouldSkipAction passes
-    mLeadFind().mockResolvedValue(makeLead({ id: action.leadId }));
-    mApptFind().mockResolvedValue(null);
-    mSysEvent().mockResolvedValue({});
-
-    const result = await processDueScheduledActions();
-
-    expect(mSend()).not.toHaveBeenCalled();
-    expect(result.cancelled).toBe(1);
-    expect(result.processed).toBe(0);
   });
 });

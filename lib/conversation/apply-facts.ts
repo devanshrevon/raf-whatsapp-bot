@@ -42,10 +42,6 @@ export function computeLeadUpdates(
 
   for (const key of STRING_FIELDS) {
     const incoming = facts[key];
-    // Never store preferredName when the lead is brand-new (stage "NEW"): the
-    // bot hasn't asked for it yet, so any value the model extracts from the
-    // opening message (e.g. "hey") is speculative and must not be persisted.
-    if (key === "preferredName" && lead.conversationStage === "NEW") continue;
     if (incoming != null && (isEmptyString(lead[key]) || corrected.has(key))) {
       updates[key] = incoming;
     }

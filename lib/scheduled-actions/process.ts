@@ -59,15 +59,11 @@ async function shouldSkipAction(
     return { skip: true, reason: "lead_closed" };
   }
 
-  // INCOMPLETE_CONVERSATION: skip if customer has replied since this was due to
-  // fire. We compare against scheduledAt (not createdAt) because lastCustomer-
-  // MessageAt is written during the same inbound turn that creates this action,
-  // so it is always <= createdAt — making the createdAt comparison ineffective
-  // when the customer replies continuously.
+  // INCOMPLETE_CONVERSATION: skip if customer has replied since this was scheduled.
   if (action.actionType === "INCOMPLETE_CONVERSATION") {
     if (
       lead.lastCustomerMessageAt &&
-      lead.lastCustomerMessageAt >= action.scheduledAt
+      lead.lastCustomerMessageAt > action.createdAt
     ) {
       return { skip: true, reason: "customer_replied" };
     }
@@ -133,17 +129,6 @@ async function processAction(action: ScheduledAction): Promise<void> {
     await failOrRetry(action, `build_message_error: ${msg}`);
     return;
   }
-
-  // Pre-send ownership check: confirm the row is still PROCESSING at this
-  // exact moment. If the inbound webhook cancelled it between shouldSkipAction
-  // and here (Timeline C), this update matches 0 rows and we abort silently —
-  // no schema migration needed since we write PROCESSING → PROCESSING (a
-  // no-op value, but Postgres still serialises the write and returns count).
-  const preSend = await db.scheduledAction.updateMany({
-    where: { id: action.id, status: "PROCESSING" },
-    data: { status: "PROCESSING" },
-  });
-  if (preSend.count === 0) return; // cancelled out from under us — abort
 
   // Send via Twilio.
   try {
@@ -308,16 +293,9 @@ const REMINDER_BEFORE_HOURS = Number(
 export async function scheduleIncompleteConversationFollowUp(
   leadId: string
 ): Promise<void> {
-  // Cancel any existing pending or in-flight incomplete-conversation actions.
-  // We cancel PROCESSING state too: if the cron claimed the action between two
-  // customer replies, a subsequent reply must still suppress it — the guard in
-  // shouldSkipAction can't help once the cron has already started the send.
+  // Cancel any existing pending incomplete-conversation actions.
   await db.scheduledAction.updateMany({
-    where: {
-      leadId,
-      actionType: "INCOMPLETE_CONVERSATION",
-      status: { in: ["PENDING", "PROCESSING"] },
-    },
+    where: { leadId, actionType: "INCOMPLETE_CONVERSATION", status: "PENDING" },
     data: { status: "CANCELLED" },
   });
 
