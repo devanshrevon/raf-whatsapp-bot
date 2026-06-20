@@ -79,3 +79,34 @@ export function computeLeadUpdates(
 function dedupe(values: string[]): string[] {
   return Array.from(new Set(values.map((v) => v.trim()).filter(Boolean)));
 }
+
+export type FactConflict = { field: string; stored: string; incoming: string };
+
+/**
+ * Find facts that CONTRADICT an already-stored value without the customer
+ * explicitly correcting them (e.g. stored housing "renting", new message says
+ * "mortgage", but the AI didn't flag a correction). computeLeadUpdates keeps the
+ * original value in this case; this surfaces the contradiction so the caller can
+ * flag it for review instead of silently dropping the new fact (spec area B).
+ */
+export function detectFactConflicts(
+  lead: Lead,
+  facts: ExtractedFacts,
+  correctedFields: string[] = []
+): FactConflict[] {
+  const corrected = new Set(correctedFields);
+  const conflicts: FactConflict[] = [];
+
+  const consider = (field: string, stored: unknown, incoming: unknown) => {
+    if (incoming == null || corrected.has(field)) return;
+    if (stored == null || (typeof stored === "string" && stored.trim() === "")) return;
+    if (String(stored).trim().toLowerCase() !== String(incoming).trim().toLowerCase()) {
+      conflicts.push({ field, stored: String(stored), incoming: String(incoming) });
+    }
+  };
+
+  for (const key of STRING_FIELDS) consider(key, lead[key], facts[key]);
+  for (const key of NUMBER_FIELDS) consider(key, lead[key], facts[key]);
+
+  return conflicts;
+}

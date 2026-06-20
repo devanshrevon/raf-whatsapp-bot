@@ -42,22 +42,25 @@ export async function markMissed(leadId: string) {
 
   await db.$transaction([
     db.lead.update({ where: { id: leadId }, data: { status: "MISSED" } }),
+    // Only mark an appointment missed AND queue a "we couldn't reach you for
+    // your scheduled call" follow-up when there actually was a booked call.
+    // Otherwise that follow-up would reference a call that never existed.
     ...(appointment
       ? [
           db.appointment.update({
             where: { id: appointment.id },
             data: { status: "MISSED" }
+          }),
+          db.scheduledAction.create({
+            data: {
+              leadId,
+              actionType: "MISSED_CALLBACK",
+              scheduledAt: new Date(),
+              status: "PENDING"
+            }
           })
         ]
-      : []),
-    db.scheduledAction.create({
-      data: {
-        leadId,
-        actionType: "MISSED_CALLBACK",
-        scheduledAt: new Date(),
-        status: "PENDING"
-      }
-    })
+      : [])
   ]);
 
   await logEvent(leadId, "marked_missed", { appointmentId: appointment?.id ?? null });

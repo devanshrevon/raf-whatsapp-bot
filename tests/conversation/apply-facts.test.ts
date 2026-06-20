@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeLeadUpdates } from "@/lib/conversation/apply-facts";
+import { computeLeadUpdates, detectFactConflicts } from "@/lib/conversation/apply-facts";
 import { factsSchema } from "@/lib/ai/schema";
 import { makeLead } from "../helpers/lead";
 
@@ -60,5 +60,39 @@ describe("computeLeadUpdates", () => {
   it("captures optional disclosures when volunteered", () => {
     const updates = computeLeadUpdates(makeLead(), facts({ bailiffInvolvement: true }));
     expect(updates.bailiffInvolvement).toBe(true);
+  });
+});
+
+describe("detectFactConflicts", () => {
+  it("flags a contradicting value that wasn't explicitly corrected", () => {
+    const lead = makeLead({ housingStatus: "renting" });
+    const conflicts = detectFactConflicts(lead, facts({ housingStatus: "mortgage" }));
+    expect(conflicts).toEqual([
+      { field: "housingStatus", stored: "renting", incoming: "mortgage" },
+    ]);
+  });
+
+  it("does NOT flag when the customer explicitly corrected the field", () => {
+    const lead = makeLead({ housingStatus: "renting" });
+    const conflicts = detectFactConflicts(
+      lead,
+      facts({ housingStatus: "mortgage" }),
+      ["housingStatus"]
+    );
+    expect(conflicts).toEqual([]);
+  });
+
+  it("does NOT flag filling an empty field or repeating the same value", () => {
+    expect(detectFactConflicts(makeLead(), facts({ housingStatus: "renting" }))).toEqual([]);
+    const lead = makeLead({ region: "London" });
+    expect(detectFactConflicts(lead, facts({ region: "london" }))).toEqual([]); // case-insensitive
+  });
+
+  it("flags a contradicting number", () => {
+    const lead = makeLead({ estimatedDebt: 14000 });
+    const conflicts = detectFactConflicts(lead, facts({ estimatedDebt: 31000 }));
+    expect(conflicts).toEqual([
+      { field: "estimatedDebt", stored: "14000", incoming: "31000" },
+    ]);
   });
 });
