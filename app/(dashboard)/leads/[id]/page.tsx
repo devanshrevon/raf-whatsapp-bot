@@ -1,12 +1,13 @@
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
-import { formatDateTime, formatGBP, formatPhone } from "@/lib/format";
+import { formatDateTime, formatGBP, formatPhone, londonDateKey } from "@/lib/format";
 import { StatusBadge } from "../../status-badge";
 import {
   bookCallbackAction,
   markCompletedAction,
   markMissedAction,
   pauseBotAction,
+  reactivateLeadAction,
   resumeBotAction,
   stopMessagesAction
 } from "./actions";
@@ -63,7 +64,13 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-export default async function LeadDetailPage({ params }: { params: { id: string } }) {
+export default async function LeadDetailPage({
+  params,
+  searchParams
+}: {
+  params: { id: string };
+  searchParams?: { bookError?: string; booked?: string };
+}) {
   const lead = await db.lead.findUnique({
     where: { id: params.id },
     include: {
@@ -104,6 +111,17 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
       </div>
       <p className="mb-6 font-mono text-sm text-ink/60">{formatPhone(lead.phoneNumber)}</p>
 
+      {searchParams?.bookError && (
+        <div className="mb-6 rounded-md border border-danger/30 bg-dangerSoft px-4 py-3">
+          <p className="text-sm font-medium text-danger">{searchParams.bookError}</p>
+        </div>
+      )}
+      {searchParams?.booked && (
+        <div className="mb-6 rounded-md border border-line bg-accentSoft px-4 py-3">
+          <p className="text-sm font-medium text-ink">Callback booked.</p>
+        </div>
+      )}
+
       {lead.vulnerabilityLevel > 0 && (
         <div className="mb-6 rounded-md border border-danger/30 bg-dangerSoft px-4 py-3">
           <p className="text-sm font-medium text-danger">
@@ -132,12 +150,17 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
             type="date"
             name="date"
             required
+            min={londonDateKey(new Date())}
             className="focus-ring rounded-md border border-line px-2 py-1 text-sm text-ink"
           />
           <input
             type="time"
             name="time"
             required
+            min="09:00"
+            max="18:00"
+            step={1800}
+            defaultValue="10:00"
             className="focus-ring rounded-md border border-line px-2 py-1 text-sm text-ink"
           />
           <button
@@ -149,7 +172,11 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         </form>
         <ActionButton action={markMissedAction} leadId={lead.id} label="Mark no answer" variant="ghost" />
         <ActionButton action={markCompletedAction} leadId={lead.id} label="Mark completed" />
-        <ActionButton action={stopMessagesAction} leadId={lead.id} label="Stop messages" variant="danger" />
+        {lead.optedOut || lead.status === "STOPPED" ? (
+          <ActionButton action={reactivateLeadAction} leadId={lead.id} label="Reactivate lead" />
+        ) : (
+          <ActionButton action={stopMessagesAction} leadId={lead.id} label="Stop messages" variant="danger" />
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

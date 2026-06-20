@@ -79,6 +79,27 @@ export async function stopMessages(leadId: string) {
 }
 
 /**
+ * Undo a stop / opt-out (e.g. the team stopped a lead by mistake, or the
+ * customer asked to resume). Clears optedOut, sets the lead back to ACTIVE, and
+ * resets the conversation stage so the bot can pick the conversation back up.
+ * NOTE: only use when the customer genuinely wants to resume — re-enabling
+ * messaging after a real opt-out is not permitted (spec §21).
+ */
+export async function reactivateLead(leadId: string) {
+  await db.lead.update({
+    where: { id: leadId },
+    data: {
+      optedOut: false,
+      status: "ACTIVE",
+      // Move off the terminal STOPPED stage so the engine resumes normally.
+      conversationStage: "DISCOVERING_SITUATION"
+    }
+  });
+
+  await logEvent(leadId, "reactivated_by_team");
+}
+
+/**
  * Book or reschedule a callback from the dashboard (spec §14, Phase 4).
  * dateStr = "YYYY-MM-DD", timeStr = "HH:MM" (Europe/London wall-clock).
  */

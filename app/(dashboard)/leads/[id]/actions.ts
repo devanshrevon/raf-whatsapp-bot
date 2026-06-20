@@ -1,7 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import * as mutations from "@/lib/leads/mutations";
+import { db } from "@/lib/db";
+import { SlotUnavailableError } from "@/lib/calendar/booking";
 
 async function refresh(leadId: string) {
   revalidatePath(`/leads/${leadId}`);
@@ -34,13 +37,56 @@ export async function stopMessagesAction(leadId: string) {
   await refresh(leadId);
 }
 
+export async function reactivateLeadAction(leadId: string) {
+  await mutations.reactivateLead(leadId);
+  await refresh(leadId);
+}
+
 export async function bookCallbackAction(
   leadId: string,
   formData: FormData
 ): Promise<void> {
   const date = (formData.get("date") as string | null) ?? "";
   const time = (formData.get("time") as string | null) ?? "";
-  if (!date || !time) throw new Error("Date and time are required.");
-  await mutations.bookOrRescheduleCallback(leadId, date, time);
+  if (!date || !time) {
+    redirect(`/leads/${leadId}?bookError=${encodeURIComponent("Please pick a date and time.")}`);
+  }
+
+  // Booking can fail for legitimate reasons (slot in the past, outside calling
+  // hours, already busy) or because the calendar is unreachable. Handle it here
+  // so the dashboard shows a clear message instead of crashing with a 500.
+  let errorMessage: string | null = null;
+  try {
+    await mutations.bookOrRescheduleCallback(leadId, date, time);
+  } catch (err) {
+    if (err instanceof SlotUnavailableError) {
+      errorMessage =
+        err.reason === "in_past"
+          ? "That time is in the past — please pick a future date and time."
+          : err.reason === "outside_hours"
+          ? "That time is outside calling hours. Please pick a time between 9am and 6pm (UK)."
+          : "That time is already booked — please pick another time.";
+    } else {
+      errorMessage =
+        "Couldn't book the callback — the calendar may be temporarily unavailable. Please try again.";
+    }
+    await db.systemEvent
+      .create({
+        data: {
+          leadId,
+          eventType: "external_api_failure",
+          detail: {
+            where: "dashboard_booking",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        },
+      })
+      .catch(() => {});
+  }
+
   await refresh(leadId);
+  // redirect() throws internally, so it must run outside the try/catch above.
+  redirect(
+    `/leads/${leadId}?${errorMessage ? `bookError=${encodeURIComponent(errorMessage)}` : "booked=1"}`
+  );
 }
