@@ -11,6 +11,7 @@ import { determineNextStep, type NextStep } from "@/lib/conversation/determine-n
 import { deRepeatReply } from "@/lib/conversation/anti-repeat";
 import { matchFaq } from "@/lib/conversation/faq";
 import { detectForeignCurrency } from "@/lib/conversation/currency";
+import { isFieldKnown } from "@/lib/conversation/fields";
 import { env } from "@/lib/env";
 
 // Core inbound pipeline (spec §10): call OpenAI once, validate the structured
@@ -71,6 +72,17 @@ function dedupe(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
+const NEGATIVE_ANSWER = /^(no|none|nope|nah|n\/?a|nothing|not really|no one|nobody)\b/i;
+
+/** A short, direct reply that's plausibly an answer to the question we asked. */
+function isPlainAnswer(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (t.includes("?")) return false; // a question, not an answer
+  if (t.split(/\s+/).length > 12) return false; // too long for a direct field answer
+  return true;
+}
+
 export async function processInboundMessage(
   lead: Lead,
   history: ChatMessage[]
@@ -119,6 +131,24 @@ export async function processInboundMessage(
 
   const lastUserMessage =
     [...history].reverse().find((m) => m.role === "user")?.content ?? "";
+
+  // Safety net: if we just asked for a specific (string) field and the customer
+  // replied with a short answer the model didn't capture (e.g. "No"/"None" for
+  // dependants), record it so the bot doesn't loop on the same question.
+  if (
+    preStep.action === "ASK_FIELD" &&
+    preStep.askField?.kind === "string" &&
+    !isFieldKnown(mergedLead, preStep.askField.key) &&
+    isPlainAnswer(lastUserMessage) &&
+    !matchFaq(lastUserMessage)
+  ) {
+    const key = preStep.askField.key;
+    const value = NEGATIVE_ANSWER.test(lastUserMessage.trim())
+      ? "None"
+      : lastUserMessage.trim().slice(0, 80);
+    (leadUpdates as Record<string, unknown>)[key] = value;
+    (mergedLead as Record<string, unknown>)[key] = value;
+  }
 
   // Review notes: contradictions kept-but-flagged, and foreign-currency amounts
   // (stored as a plain number but displayed as GBP). The route logs these.
