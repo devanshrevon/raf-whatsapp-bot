@@ -44,7 +44,12 @@ export type NextStep = {
 
 export function determineNextStep(lead: Lead, riskLevel: number): NextStep {
   // Serious / vulnerable situations stop ordinary progression (spec §20).
-  if (riskLevel >= 2) {
+  // Escalate on EITHER the current message's risk OR a vulnerability already
+  // recorded on the lead (e.g. set by the inbound keyword pre-scan). Without the
+  // stored level, a flagged lead whose next message reads as low-risk would be
+  // dragged back into ordinary qualifying questions.
+  const effectiveRisk = Math.max(riskLevel, lead.vulnerabilityLevel ?? 0);
+  if (effectiveRisk >= 2) {
     return { stage: "NEEDS_HUMAN_REVIEW", action: "ESCALATE_HUMAN", askField: null };
   }
 
