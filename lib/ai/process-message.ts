@@ -115,6 +115,10 @@ export async function processInboundMessage(
   const postStep = determineNextStep(mergedLead, ai.riskLevel);
   leadUpdates.conversationStage = postStep.stage;
 
+  // Escalation can be driven by this message's risk OR a vulnerability already
+  // on the lead (e.g. the keyword pre-scan), so key off the resolved step.
+  const escalated = postStep.action === "ESCALATE_HUMAN";
+
   if (ai.riskLevel >= 1) {
     leadUpdates.vulnerabilityLevel = Math.max(lead.vulnerabilityLevel, ai.riskLevel);
     leadUpdates.vulnerabilityFlags = dedupe([
@@ -122,7 +126,7 @@ export async function processInboundMessage(
       ...ai.riskFlags,
     ]);
   }
-  if (ai.riskLevel >= 2) {
+  if (escalated) {
     leadUpdates.status = "NEEDS_REVIEW";
   }
 
@@ -146,7 +150,7 @@ export async function processInboundMessage(
     reply,
     leadUpdates,
     nextStage: postStep.stage,
-    needsHumanReview: ai.riskLevel >= 2,
+    needsHumanReview: escalated,
     riskLevel: ai.riskLevel,
     riskFlags: ai.riskFlags,
     intent: ai.intent,
