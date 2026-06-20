@@ -137,13 +137,23 @@ export async function processInboundMessage(
     const check = validateReply(reply, mergedLead);
     if (!reply || !check.ok) reply = SAFE_HOLD_REPLY;
   } else {
-    const check = validateReply(reply, mergedLead);
-    if (!check.ok) reply = fallbackReply(postStep, ai.customerQuestion);
-    // Never send the exact same message twice in a row (avoids the "same reply
-    // to everything" loop when the customer gives non-answers).
-    const lastBot =
-      [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
-    reply = deRepeatReply(reply, lastBot, postStep, mergedLead.preferredName);
+    // Approved FAQ (spec §18): if the customer asked one of the approved
+    // questions, answer with the EXACT approved wording — never the model's
+    // paraphrase. Match the AI-extracted question first, then the raw message.
+    const lastUser =
+      [...history].reverse().find((m) => m.role === "user")?.content ?? "";
+    const faq = matchFaq(ai.customerQuestion) ?? matchFaq(lastUser);
+    if (faq) {
+      reply = faq.answer;
+    } else {
+      const check = validateReply(reply, mergedLead);
+      if (!check.ok) reply = fallbackReply(postStep, ai.customerQuestion);
+      // Never send the exact same message twice in a row (avoids the "same reply
+      // to everything" loop when the customer gives non-answers).
+      const lastBot =
+        [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+      reply = deRepeatReply(reply, lastBot, postStep, mergedLead.preferredName);
+    }
   }
 
   return {
