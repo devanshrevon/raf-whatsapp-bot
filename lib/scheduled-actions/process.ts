@@ -59,13 +59,17 @@ async function shouldSkipAction(
     return { skip: true, reason: "lead_closed" };
   }
 
-  // INCOMPLETE_CONVERSATION: skip if customer has replied since this was scheduled.
+  // INCOMPLETE_CONVERSATION: only fire once the customer has genuinely gone
+  // quiet for the FULL follow-up delay. If they've replied within that window
+  // they're still actively engaged, so we must not send — this prevents the
+  // follow-up firing mid-conversation (spec §16.1). Using the live "time since
+  // last reply" (not a compare against createdAt) also means duplicate or
+  // in-flight reminders all get skipped while the customer is active.
   if (action.actionType === "INCOMPLETE_CONVERSATION") {
-    if (
-      lead.lastCustomerMessageAt &&
-      lead.lastCustomerMessageAt > action.createdAt
-    ) {
-      return { skip: true, reason: "customer_replied" };
+    const last = lead.lastCustomerMessageAt?.getTime();
+    const quietWindowMs = INCOMPLETE_DELAY_HOURS * 60 * 60_000;
+    if (last && Date.now() - last < quietWindowMs) {
+      return { skip: true, reason: "customer_active" };
     }
   }
 

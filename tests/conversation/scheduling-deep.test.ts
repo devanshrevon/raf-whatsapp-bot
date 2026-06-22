@@ -266,14 +266,16 @@ describe("guard cancellation — lead status closed", () => {
 
 // ── guard cancellation — customer replied ─────────────────────────────────────
 
-describe("guard cancellation — customer replied", () => {
-  it("cancels INCOMPLETE_CONVERSATION when customer replied AFTER action was created", async () => {
-    const createdAt = new Date("2026-06-18T10:00:00Z");
-    const replyAt = new Date("2026-06-18T11:00:00Z");
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
+describe("guard — incomplete-conversation only fires after real quiet", () => {
+  it("skips while the customer is still active (replied within the window)", async () => {
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION" });
     setupCancelPath(action);
     mLeadFind().mockResolvedValue(
-      makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
+      makeLead({
+        id: action.leadId,
+        // Replied a minute ago — clearly mid-conversation.
+        lastCustomerMessageAt: new Date(Date.now() - 60_000),
+      })
     );
 
     const result = await processDueScheduledActions();
@@ -281,13 +283,15 @@ describe("guard cancellation — customer replied", () => {
     expect(mSend()).not.toHaveBeenCalled();
   });
 
-  it("sends INCOMPLETE_CONVERSATION when customer replied BEFORE action was created", async () => {
-    const createdAt = new Date("2026-06-18T10:00:00Z");
-    const replyAt = new Date("2026-06-18T09:00:00Z");
-    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION", createdAt });
+  it("sends once the customer has been quiet beyond the delay", async () => {
+    const action = makeAction({ actionType: "INCOMPLETE_CONVERSATION" });
     setupSuccessfulSend(action);
     mLeadFind().mockResolvedValue(
-      makeLead({ id: action.leadId, lastCustomerMessageAt: replyAt })
+      makeLead({
+        id: action.leadId,
+        // Last reply 48h ago, well past the 24h default delay.
+        lastCustomerMessageAt: new Date(Date.now() - 48 * 60 * 60_000),
+      })
     );
 
     const result = await processDueScheduledActions();
